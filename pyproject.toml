@@ -27,3 +27,6 @@ packages = ["claw_zero"]
 
 [tool.pytest.ini_options]
 testpaths = ["claw_zero"]
+# importlib mode: don't walk up through repo-root __init__.py (the legacy
+# ale-claw deployer package) when importing claw_zero test modules.
+addopts = "--import-mode=importlib"
