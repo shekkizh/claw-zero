@@ -253,3 +253,18 @@ design; they were packaging/doc fixes, now complete.
 
 > The original definition of done was met before the reorg. The reorg introduced
 > the §13 packaging gap, which is now the milestone's only outstanding work.
+
+## Deferred by design
+
+These are intentionally **absent** (TODO markers, not built):
+
+- **web search**, computer use / GUI, images, vision
+- **subagent delegation**, teams
+- **A2A (agent-to-agent) network transport** — the mailbox is in-memory now, but
+  behind an interface so a real transport drops in later
+- **cron / scheduling**
+- a **policy / permission gate**
+- the `DONE` signal (replaced by "deliver a message")
+
+See `docs/comparison.html` §09 for the merged-architecture blueprint this milestone
+implements.

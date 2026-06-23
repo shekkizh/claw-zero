@@ -1,22 +1,4 @@
-"""Context compaction — budget-aware history pruning + LLM summarization.
-
-Ported from ``harness/context/compaction.py`` and **adapted to OpenAI chat
-shape**: the harness operates on CUA canonical blocks (``function_call`` /
-``tool_result`` inside ``content``); claw-zero's loop carries chat-shaped
-messages — assistant messages with a ``tool_calls`` list (each ``{id, function}``)
-and tool results as separate ``{"role": "tool", "tool_call_id": ...}`` messages.
-
-The pipeline (matching the harness):
-  1. Preserve the last N turns (assistant messages) unconditionally.
-  2. Budget the kept history at ``context_window * max_history_share`` (0.4) and
-     prune the older pruneable half until it fits.
-  3. LLM-summarize the compacted-away portion (chunked, with retry + fallback).
-  4. Repair orphaned tool_call/tool_result pairing on every split boundary.
-
-``compact_messages`` returns a ``CompactionResult`` carrying the summary and the
-split index; the caller rebuilds its message list as
-``[summary-as-user-message] + kept``.
-"""
+"""Context compaction — budget-aware history pruning + LLM summarization."""
 
 from __future__ import annotations
 
