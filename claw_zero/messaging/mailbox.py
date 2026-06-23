@@ -80,6 +80,10 @@ class Mailbox:
         except asyncio.QueueEmpty:
             return None
 
+    def has_pending(self) -> bool:
+        """True if at least one message is waiting (non-destructive peek)."""
+        return self._queue.qsize() > 0
+
     def __len__(self) -> int:
         """Number of messages currently waiting (mirrors mailbox.ts ``length``)."""
         return self._queue.qsize()
