@@ -35,7 +35,11 @@ def test_with_tools_and_memory_sections_appear():
 def test_cache_boundary_separates_static_from_volatile():
     out = build_prompt(
         tool_summaries={"bash": "Run a shell command locally."},
-        runtime=RuntimeContext(date="2026-06-22", agent_id="claw-zero", cwd="/tmp"),
+        runtime=RuntimeContext(
+            date="2026-06-22", agent_id="claw-zero", cwd="/tmp",
+            memory_dir="/state/claw-zero/memory",
+            curated_path="/state/claw-zero/AGENT_MEMORY.md",
+        ),
         context_files=[ContextFile(path="AGENTS.md", content="home doc")],
         has_memory=True,
     )
@@ -43,6 +47,9 @@ def test_cache_boundary_separates_static_from_volatile():
     static, dynamic = out.split(CACHE_BOUNDARY, 1)
     # Volatile content lives BELOW the boundary (cache-safe prefix above).
     assert "2026-06-22" in dynamic
+    # Absolute memory paths are surfaced so the agent can find its files via bash.
+    assert "/state/claw-zero/memory" in dynamic
+    assert "/state/claw-zero/AGENT_MEMORY.md" in dynamic
     assert "2026-06-22" not in static
     assert "# Project Context" in dynamic
     assert "# Identity" in static

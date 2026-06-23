@@ -56,6 +56,8 @@ class RuntimeContext:
     agent_id: str = "claw-zero"
     peers: list[str] | None = None   # peer ids currently reachable
     cwd: str = ""
+    memory_dir: str = ""    # absolute path to the session-log directory
+    curated_path: str = ""  # absolute path to AGENT_MEMORY.md
 
 
 def _trim_bootstrap(content: str, file_name: str, max_chars: int) -> str:
@@ -257,6 +259,13 @@ def _runtime_context(runtime: RuntimeContext | None) -> list[str]:
         lines.append(f"- Working directory: {runtime.cwd}")
     if runtime.peers:
         lines.append(f"- Reachable peers: {', '.join(runtime.peers)}")
+    if runtime.curated_path:
+        lines.append(f"- Curated memory file (read/write via bash): {runtime.curated_path}")
+    if runtime.memory_dir:
+        lines.append(
+            f"- Session log directory (append via bash): {runtime.memory_dir} "
+            "— the current session log is the highest-numbered session-NNN.md there."
+        )
     lines.append("")
     return lines
 

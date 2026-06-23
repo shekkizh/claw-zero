@@ -14,6 +14,7 @@ prompt's pacing guidance.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -118,6 +119,8 @@ class Agent:
             agent_id=self.agent_id,
             peers=peers,
             cwd=self._cwd(),
+            memory_dir=str(self.memory_store.memory_dir.resolve()),
+            curated_path=str((self.memory_store.agent_dir / self.memory_store.CURATED_FILE).resolve()),
         )
         return build_prompt(
             tool_summaries=self.tools.summaries,
@@ -164,11 +167,27 @@ async def deliver(reply: Message, peers: list[Peer]) -> bool:
     return False
 
 
-async def run(mailbox: Mailbox, peers: list[Peer], agent: Agent) -> None:
-    """The forever loop: receive → activate → deliver. Never returns on its own."""
+async def run(
+    mailbox: Mailbox,
+    peers: list[Peer],
+    agent: Agent,
+    *,
+    idle: asyncio.Event | None = None,
+) -> None:
+    """The forever loop: receive → activate → deliver. Never returns on its own.
+
+    ``idle`` (optional) is set whenever the loop is blocked waiting for a message
+    with nothing in flight, and cleared while an activation runs. A supervisor
+    (e.g. ``__main__`` on stdin EOF) can wait on it to tear down *between*
+    activations rather than cancelling one mid-flight.
+    """
     peer_ids = _peer_ids(peers)
     while True:
+        if idle is not None:
+            idle.set()
         msg = await mailbox.receive()
+        if idle is not None:
+            idle.clear()
 
         # On a tick with a real message already queued behind it, skip the tick
         # entirely and go straight to that message (no point waking up to think

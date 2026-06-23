@@ -80,22 +80,34 @@ async def _run(config: ClawZeroConfig) -> None:
         flush=True,
     )
 
-    background = [asyncio.create_task(human.inbound(mailbox))]
+    idle = asyncio.Event()
+    inbound_task = asyncio.create_task(human.inbound(mailbox))
+    extra_tasks = []
     if config.tick_seconds is not None:
-        background.append(
+        extra_tasks.append(
             asyncio.create_task(tick_source(mailbox, config.tick_seconds, agent_id=config.agent_id))
         )
 
-    loop_task = asyncio.create_task(run(mailbox, peers, agent))
+    loop_task = asyncio.create_task(run(mailbox, peers, agent, idle=idle))
     try:
-        # The outer loop never returns on its own; we exit when stdin closes
-        # (the inbound task finishes) or on interrupt.
-        await background[0]
+        # The outer loop never returns on its own; we begin shutdown when stdin
+        # closes (the inbound task finishes).
+        await inbound_task
+        # Graceful drain: let any queued messages and the in-flight activation
+        # finish, so we never cancel a model call mid-flight. We're done once the
+        # mailbox is empty AND the loop is sitting idle.
+        while mailbox.has_pending() or not idle.is_set():
+            try:
+                await asyncio.wait_for(idle.wait(), timeout=0.2)
+            except asyncio.TimeoutError:
+                pass
+            if not mailbox.has_pending() and idle.is_set():
+                break
     finally:
         loop_task.cancel()
-        for task in background[1:]:
+        for task in extra_tasks:
             task.cancel()
-        for task in [loop_task, *background[1:]]:
+        for task in [loop_task, *extra_tasks]:
             try:
                 await task
             except asyncio.CancelledError:
