@@ -67,11 +67,13 @@ class Agent:
         max_tool_result_chars: int = 16_000,
         cwd: str | None = None,
         agents_md: str | None = None,
+        context_window: int | None = None,
     ) -> "Agent":
         """Wire up an Agent with its memory store, transcript, and bash tool.
 
         ``agents_md`` (the loaded ``AGENTS.md`` text) is injected as a context
         file. The session log and transcript session header are initialized here.
+        ``context_window`` overrides the model-resolved window when given.
         """
         memory_store = MemoryStore(agent_id=agent_id, base_dir=base_dir)
         memory_store.init_session()
@@ -93,7 +95,7 @@ class Agent:
             memory_store=memory_store,
             transcript=transcript,
             tools=tools,
-            context_window=resolve_context_window(model),
+            context_window=context_window or resolve_context_window(model),
             compaction_threshold=compaction_threshold,
             max_tool_result_chars=max_tool_result_chars,
             context_files=context_files,
