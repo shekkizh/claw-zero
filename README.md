@@ -1,155 +1,159 @@
-# ALE Claw
+# claw-zero
 
-ALE Claw is the in-tree reference harness for running a general computer-use
-agent on [Agents' Last Exam](https://github.com/rdi-berkeley/agents-last-exam).
-It is a Python-native harness inspired by the
-[OpenClaw](https://docs.openclaw.ai/) agent architecture and uses the
-[Cua Agent SDK](https://cua.ai/docs/cua/reference/agent-sdk) to drive the VM.
-ALE Claw is built for ALE's long-horizon benchmark tasks, where the agent may
-need to work across software, files, shell commands, browser workflows, and a
-remote desktop in a single run.
+A **minimal, non-user-facing, self-owned, long-running agent loop.**
 
-ALE Claw is also intentionally minimal. One of its main ideas is that a small
-harness with the right loop, tools, memory, and context management can still
-perform strongly on ALE. The harness stays narrow by design so the model, not a
-large product layer, does most of the work.
+Its defining idea: **humans and agents are equal units/operators.** claw-zero
+does not special-case "the user." It only ever:
 
-> **Why minimal?** The companion blog post,
-> [*Does the Harness Matter?*](https://agents-last-exam.org/blogs/harness-matters),
-> reports the evidence: with GPT-5.5 held fixed, ALE Claw reaches the same accuracy
-> band as OpenClaw, Codex, Cursor, and Droid while using far fewer tokens, dollars,
-> and minutes.
+1. **receives a message** addressed to it (from a human peer, another agent, or a
+   self-tick), and
+2. **sends a message** to some peer (a human or another agent).
 
-## What the harness does
+**An activation ends when the agent delivers a message** — its plain-text reply *is* that message. The
+outer loop then waits for the next message and goes again, forever.
 
-ALE Claw runs a single action loop that repeats until the task is done or the
-turn budget is exhausted.
-
-On each turn, it:
-
-1. Builds the model context from the transcript and prompt files.
-2. Calls the model.
-3. Executes requested tools or GUI actions on the VM.
-4. Records the results.
-5. Compacts old context when the history gets too large.
-6. Flushes important information to disk-backed memory before compaction.
-
-Out of the box, the harness supports:
-
-- File tools: `read`, `write`, `edit`
-- Shell execution: `exec`
-- Web tools: `web_search`, `web_fetch`
-- Vision: `analyze_image`
-- GUI control: `computer`
-- Memory lookup: `memory_search`, `memory_get`
-- Delegation: `delegate_general`, `delegate_gui`
-
-> Note: `web_search` is disabled by default because it needs `BRAVE_API_KEY`.
-
-## Running it
-
-Use `harness: ale_claw` in an ALE agent config:
-
-```yaml
-harness: ale_claw
-model: openrouter/anthropic/claude-sonnet-4.6
-config:
-  max_turns: 100
-  thinking_level: "off"
-```
-
-Then run an experiment:
+## Quickstart
 
 ```bash
-export OPENROUTER_API_KEY=...
-uv run python -m ale_run run experiments/my_experiment.yaml
+# Install (litellm is the only runtime dependency).
+pip install -e ".[dev]"        # or: uv pip install -e ".[dev]"
+
+# A provider key in the environment (litellm reads it — never config/argv):
+export OPENAI_API_KEY=...       # or ANTHROPIC_API_KEY / OPENROUTER_API_KEY / ...
+
+# Run the self-owned loop. You are just a peer over stdio.
+python -m claw_zero
 ```
 
-At least one LLM provider key must be present in the environment:
+Then type a message and press Enter:
 
-- `OPENROUTER_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `OPENAI_API_KEY`
-
-To enable `web_search`, also export `BRAVE_API_KEY` and remove
-`web_search` from `disabled_tools`.
-
-## The config knobs that matter first
-
-The full config surface lives in `config.py`, but most users only need these:
-
-- `model`: main model id in LiteLLM format
-- `max_turns`: hard cap on the action loop
-- `thinking_level`: base reasoning level
-- `disabled_tools`: tools to hide from the model
-<!-- - `summary_model` / `auxiliary_model` / `gui_model`: helper models -->
-
-Minimal direct usage looks like this:
-
-```python
-from ale_run.agents.ale_claw import AleClawConfig, AleClawDeployer
-
-cfg = AleClawConfig(
-    model="openrouter/anthropic/claude-sonnet-4.6",
-    max_turns=100,
-    thinking_level="off",
-)
+```
+claw-zero [claw-zero] online — model openai/gpt-5.5, context window 1,050,000 tokens. ...
+What files are in the current directory? Then save a note that you checked.
+[claw-zero] Files: alpha.txt, beta.md. I saved a note in .../memory/session-001.md.
 ```
 
-## Where to read the code
+The process never exits on its own; type another message for a follow-up.
+Ctrl-D (stdin EOF) or Ctrl-C shuts it down gracefully (it finishes the in-flight
+activation first).
 
-If you want to understand the harness quickly, read these files in order:
+### Useful flags
 
-- `deployer.py`: ALE entry point
-- `config.py`: runtime knobs
-- `harness/agent_loop.py`: main loop
-- `harness/prompt.py`: system prompt assembly
-- `harness/tools/tools.py`: tool registry
-- `harness/context/`: transcript replay and compaction
-- `harness/memory/`: durable memory and memory flush
-- `harness/subagent/`: delegation
+```bash
+python -m claw_zero --model anthropic/claude-opus-4-8   # any LiteLLM model id
+python -m claw_zero --tick-seconds 60                   # self-tick every 60s (off by default)
+python -m claw_zero --base-dir ./state                  # where memory + transcript live
+python -m claw_zero --help                              # all knobs
+```
 
-## Directory map
+## The two-loop split
+
+claw-zero deliberately separates the outer and inner loops into separate modules:
+
+- **Outer loop** (`outer_loop.py`) — the self-owned loop that never returns. It
+  owns the durable cross-activation state (the running conversation, transcript,
+  memory store, flush bookkeeping, tools) and the prompt assembly. Each turn it
+  `receive`s the next message, appends it to the conversation, runs **one inner
+  activation**, and `deliver`s the reply by routing `reply.recipient` to that
+  peer's `outbound()`.
+
+- **Inner loop** (`inner_loop.py`) — one activation → one delivered message. It
+  flushes memory if triggered, calls the model, runs any `bash` tool calls,
+  compacts in place when over budget, and **returns the model's plain-text reply
+  as the delivered `Message`**. That return value replaces `DONE`.
+
+```
+                ┌─────────────────────── outer_loop.run (forever) ───────────────────────┐
+  peers ──msg──▶│  mailbox.receive → append → inner_loop.run(activation) → deliver(reply) │──msg──▶ peers
+                └──────────────────────────────┬──────────────────────────────────────────┘
+                                               │  one activation:
+                                  flush? → llm.call → [bash]* → compact? → reply Message
+```
+
+## Humans and agents are equal peers
+
+Everything moves through one channel — the **mailbox** (`messaging/mailbox.py`,
+an `asyncio.Queue`). A **peer** (`messaging/peer.py`) bridges some external
+channel to the mailbox; the human is just `StdioPeer`. Nothing in the loop
+branches on `sender == "human"`. The only allowed message branch is `kind`
+(`"tick"` vs `"message"`). A reply is routed purely by `recipient` id, so a
+human peer and a (future) agent peer are interchangeable.
+
+A **tick** is "you're awake, what now?". If there's nothing useful to do, the
+agent **sleeps** — it replies with empty text, and the loop delivers nothing and
+waits for the next message.
+
+## The single tool: `bash`
+
+claw-zero has exactly one tool — `bash` (`tools/bash.py`), a **client-side,
+local subprocess**. It is also the file tool:
+
+| Need | Use |
+|---|---|
+| read a file | `cat path` / `sed -n '1,40p' path` |
+| search contents | `grep -rn "pat" .` / `rg "pat"` |
+| find files | `find . -name '*.py'` |
+| edit in place | `sed -i ...` / `python -c ...` |
+| write a file | redirection / `python - <<'PY' ...` |
+
+The working directory **persists** between calls; shell state (env vars,
+functions) does **not** — each call is a fresh `/bin/sh`. Timeouts kill the whole
+process group, so children aren't orphaned. There are no dedicated
+read/write/edit/grep/glob tools, no web search, and no permission gate.
+
+## Durable memory
+
+Memory (`memory/store.py`) is file-backed and agent-scoped:
+
+```
+claw_zero_state/<agent_id>/
+├── AGENT_MEMORY.md          # curated, full-overwrite knowledge
+└── memory/
+    └── session-NNN.md       # append-only session log (scratchpad)
+```
+
+The agent reads and writes these **via bash** (their absolute paths are surfaced
+in the prompt's Runtime context). Before context is compacted, a
+**flush-before-compaction** turn (`memory/flush.py`) gives the model one chance
+to persist durable memory via a `memory_write` call routed to the store — so
+durable memory survives context loss on long runs.
+
+## Context & compaction
+
+Long runs compact **in place** (`context/compaction.py`): recent turns are
+preserved, older history is LLM-summarized into a checkpoint, and
+tool_call/tool_result pairing is repaired so the conversation stays valid. An
+append-only JSONL transcript (`context/transcript.py`) records every turn.
+
+## Layout
 
 ```text
-ale_run/agents/ale_claw/
-├── config.py
-├── deployer.py
-├── transcript_to_trajectory.py
-└── harness/
-    ├── AGENTS.md
-    ├── agent_loop.py
-    ├── prompt.py
-    ├── session.py
-    ├── tools/
-    ├── context/
-    ├── memory/
-    ├── subagent/
-    ├── model/
-    └── adapters/
+claw_zero/
+├── __main__.py            # entry point — wires everything, runs the outer loop
+├── config.py              # ClawZeroConfig (no effort knob — effort is always max)
+├── llm.py                 # single litellm call + thinking/effort + model resolve + cache policy
+├── prompt.py              # gated "absence is the signal" system-prompt builder
+├── AGENTS.md              # the persistent operating doc (peer-among-peers ethos)
+├── outer_loop.py          # self-owned loop + Agent (durable state)
+├── inner_loop.py          # one activation → one delivered Message
+├── messaging/             # mailbox.py (Mailbox/Message), peer.py (Peer/StdioPeer/tick)
+├── tools/                 # bash.py (the one tool), registry.py (build_tools split)
+├── context/               # token_estimation.py, compaction.py, transcript.py
+├── memory/                # store.py (MemoryStore), flush.py (pre-compaction flush)
+└── PORTING.md             # per-source KEEP/PORT/DROP map from the ALE Claw harness
 ```
 
-## ALE Claw vs. OpenClaw
+## Deferred by design
 
-ALE Claw reuses the core ideas that make OpenClaw useful for long-horizon agent
-work: a tool-driven action loop, context compaction, durable memory, and
-subagents. The difference is scope. [OpenClaw](https://docs.openclaw.ai/) is a
-broader agent platform; ALE Claw is the benchmark-oriented harness version
-adapted to ALE's Python runtime and
-[Cua](https://cua.ai/docs/cua/guide/get-started/what-is-cua)-based VM control.
+These are intentionally **absent** (TODO markers, not built):
 
-ALE Claw keeps the parts that matter most for ALE evaluation:
+- **web search**, computer use / GUI, images, vision
+- **subagent delegation**, teams
+- **A2A (agent-to-agent) network transport** — the mailbox is in-memory now, but
+  behind an interface so a real transport drops in later
+- **cron / scheduling**
+- a **policy / permission gate**
+- the `DONE` signal (replaced by "deliver a message")
 
-- a single long-horizon action loop
-- a typed tool surface for files, shell, web, vision, and GUI control
-- context compaction for long runs
-- durable memory
-- subagent delegation
-
-To stay focused on single-task benchmark evaluation, ALE Claw leaves out the
-broader interactive-assistant features of the OpenClaw platform, such as
-messaging integrations, real-time interaction surfaces, user account and
-preference layers, and the larger gateway/server product surface.
-
-That tradeoff is deliberate: ALE Claw is meant to show that a focused, minimal
-harness can still perform strongly on ALE.
+See `docs/comparison.html` §09 for the merged-architecture blueprint this milestone
+implements.
