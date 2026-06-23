@@ -2,6 +2,14 @@
 __pycache__
 .pytest_cache
 
+# Python build / editable-install artifacts
+*.egg-info/
+build/
+dist/
+
+# Agent runtime state (memory + transcript)
+claw_zero_state/
+
 .cursor
 
 .env

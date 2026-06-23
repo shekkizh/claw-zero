@@ -16,7 +16,9 @@ outer loop then waits for the next message and goes again, forever.
 
 ```bash
 # Install (litellm is the only runtime dependency).
-pip install -e ".[dev]"        # or: uv pip install -e ".[dev]"
+uv pip install -e ".[dev]"     # or: pip install -e ".[dev]"
+# Note: this repo's .venv is created by uv, which does NOT include pip — use
+# `uv pip` (bare `pip` falls back to a system Python and fails requires-python).
 
 # A provider key in the environment (litellm reads it — never config/argv):
 export OPENAI_API_KEY=...       # or ANTHROPIC_API_KEY / OPENROUTER_API_KEY / ...
@@ -127,8 +129,12 @@ append-only JSONL transcript (`context/transcript.py`) records every turn.
 
 ## Layout
 
+The package modules live at the repo root (the importable package name is
+`claw_zero`; `pyproject.toml` maps it onto this directory):
+
 ```text
-claw_zero/
+claw-zero/                 # repo root == the claw_zero package
+├── pyproject.toml         # packaging — maps the claw_zero package onto the root
 ├── __main__.py            # entry point — wires everything, runs the outer loop
 ├── config.py              # ClawZeroConfig (no effort knob — effort is always max)
 ├── llm.py                 # single litellm call + thinking/effort + model resolve + cache policy
@@ -140,7 +146,8 @@ claw_zero/
 ├── tools/                 # bash.py (the one tool), registry.py (build_tools split)
 ├── context/               # token_estimation.py, compaction.py, transcript.py
 ├── memory/                # store.py (MemoryStore), flush.py (pre-compaction flush)
-└── PORTING.md             # per-source KEEP/PORT/DROP map from the ALE Claw harness
+├── tests/                 # 50 tests (pytest)
+└── docs/                  # PORTING.md (KEEP/PORT/DROP map), summaries, comparison, TODO
 ```
 
 ## Deferred by design
