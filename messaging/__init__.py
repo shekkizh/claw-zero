@@ -1,10 +1,13 @@
 """Messaging substrate — the equal-operator channel.
 
-The mailbox is the *only* channel claw-zero uses; a human and any future agent
-both speak through it. Nothing in the loop branches on who the sender is.
+The ``MessageBus`` routes ``Message`` objects between per-agent mailboxes and the
+human's stdio channel; every participant is addressed by name, and nothing
+branches on who the sender is. This in-process message-passing is claw-zero's
+agent-to-agent layer.
 """
 
+from .bus import MessageBus
 from .mailbox import Mailbox, Message
 from .peer import Peer, StdioPeer
 
-__all__ = ["Mailbox", "Message", "Peer", "StdioPeer"]
+__all__ = ["MessageBus", "Mailbox", "Message", "Peer", "StdioPeer"]

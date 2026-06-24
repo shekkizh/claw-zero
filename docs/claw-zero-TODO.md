@@ -37,6 +37,7 @@
 | 9 | Entry point & config | ✅ shipped |
 | 10 | Verify & document | ✅ shipped (50 tests green, live smoke test) |
 | 13 | Post-reorg follow-ups | ✅ done — `pyproject.toml` restored; runnable, 50 tests pass |
+| 14 | **Team of agents** (flat peer mesh) | ✅ shipped — bus + send_message + spawn_agent; 67 tests pass + live 2-agent smoke test |
 
 ---
 
@@ -66,9 +67,11 @@ The outer loop then waits for the next message and goes again, forever.
 - **Tools (minimal):** exactly one — `bash` (client-side, local subprocess). It is
   also the file tool (`cat`/`grep`/`find`/`sed`/`python -c`). No dedicated
   read/write/edit/grep/glob tools, no web search, no policy/permission gate.
-- **Messaging transport:** in-memory mailbox; **human is just a peer over stdio**,
-  behind an interface so a real agent-to-agent (A2A) transport drops in later.
-  **A2A substrate is explicitly deferred — not built.**
+- **Messaging transport:** in-memory bus + per-agent mailboxes; **the human is a
+  named participant over stdio**, addressed by name exactly like an agent. This
+  in-process message-passing **is** the agent-to-agent (A2A) system — it is the
+  point of the project, not a placeholder. A cross-process / network transport is
+  **not a goal** (no external/remote agents).
 - **Outer loop vs inner loop are separate modules.**
 
 **Ground-truth facts (settled — do not "correct" these):**
@@ -207,6 +210,23 @@ the live smoke test recorded in `memory/session-001.md`). Paths below are the
   deferred list.
 - [x] **10.3 Tests** — 50 tests pass (`pytest`). They import the `claw_zero`
   package name, which resolves again via the restored `pyproject.toml` (§13.1).
+---
+
+## 12. Definition of done 
+
+- [x] A self-owned loop that never exits on its own; a human peer over stdio can
+  converse with it; the human is one peer among (future) many — no
+  `sender == "human"` special-casing.
+- [x] Exactly one client-side tool: `bash`.
+- [x] An activation ends by **delivering a message**, never by emitting "DONE".
+- [x] Durable memory (session log + curated) and flush-before-compaction work;
+  long runs compact in place without losing tool pairing.
+- [x] No `cua-*` dependency; no computer-use/GUI/image/subagent code.
+- [x] At the original milestone, teams were absent by design; cron and a policy
+  gate still are. (Teams + in-process A2A messaging shipped later — see §14.)
+
+> The original definition of done was met before the reorg. The reorg introduced
+> the §13 packaging gap, which is now the milestone's only outstanding work.
 
 ---
 
@@ -239,32 +259,72 @@ design; they were packaging/doc fixes, now complete.
 
 ---
 
-## 12. Definition of done (the original milestone — MET)
+## 14. Team of agents — flat peer mesh (SHIPPED)
 
-- [x] A self-owned loop that never exits on its own; a human peer over stdio can
-  converse with it; the human is one peer among (future) many — no
-  `sender == "human"` special-casing.
-- [x] Exactly one client-side tool: `bash`.
-- [x] An activation ends by **delivering a message**, never by emitting "DONE".
-- [x] Durable memory (session log + curated) and flush-before-compaction work;
-  long runs compact in place without losing tool pairing.
-- [x] No `cua-*` dependency; no computer-use/GUI/image/subagent code.
-- [x] A2A transport, teams, cron, and any policy gate are **absent by design**.
+Extends claw-zero from one self-owned loop to **N loops sharing one bus**, while
+keeping the "humans and agents are equal operators" thesis literal. A teammate is
+just another participant addressed by id; "message a teammate" and "reply to the
+human" are the same `bus.route(...)` call. Drew the *peer-team* model from Claude
+Code (`SendMessage`/`TeamCreate`/named teammates/auto-delivery) rather than ALE
+Claw's parent→subagent hierarchy, because the flat mesh matches the thesis.
 
-> The original definition of done was met before the reorg. The reorg introduced
-> the §13 packaging gap, which is now the milestone's only outstanding work.
+**Design decisions (settled):**
+- **Flat peer mesh, no lead, no shared task board.** Any agent can message any
+  other agent or the human; coordination is emergent via messages. (No
+  Claude-Code-style team lead / task-ownership board — that was the rejected
+  alternative.)
+- **Both static roster and runtime spawn.** `--agents a,b,c` launches teammates
+  at startup; `spawn_agent` brings new ones online mid-run. `--no-spawn` drops
+  the spawn tool.
+- **In-process only.** Every agent is a coroutine in one event loop. A2A network
+  transport stays deferred — the `MessageBus` is the seam it drops into (routing
+  is already by recipient id).
+- **"Absence is the signal" preserved.** A lone agent (no roster, no spawn) is
+  byte-for-byte the original: bash-only tool surface, no `# Team` prompt section.
+  Team tools/prose appear only when the run is team-capable.
+- **Cache-stable gating.** `has_team` (and team-tool registration) is fixed at
+  agent creation from config, never from the live peer count — so the `# Team`
+  section stays in the byte-stable cached prefix even as `spawn_agent` grows the
+  roster.
 
+**What shipped:**
+- [x] **14.1 `messaging/bus.py`** — `MessageBus`: per-agent inboxes + external
+  peers, `route()` (the single delivery point), `reachable_from()`,
+  `has_pending()` drain check. `add_agent` idempotent.
+- [x] **14.2 `messaging/peer.py`** — `Peer` now bridges *external* channels into
+  the bus (not the mailbox). `StdioPeer.inbound` parses `@id`/`id:` addressing
+  against the roster (default recipient otherwise); `tick_source` ticks every
+  agent. `parse_address` helper.
+- [x] **14.3 `tools/send_message.py`** — DM a peer by id, or `*` to broadcast to
+  all teammates (never the human). Does not end the turn. Rejects self/unknown.
+- [x] **14.4 `tools/spawn_agent.py`** — create a teammate at runtime (id, optional
+  model + opening brief). Thin validator over a `Team`-supplied `spawn` callback
+  (avoids a tool→team import cycle).
+- [x] **14.5 `team.py`** — `Team` owns the bus, roster, per-agent loop tasks, the
+  tick source, runtime spawn, and graceful drain (`run_until_eof` waits for the
+  *whole mesh* to settle before teardown).
+- [x] **14.6 `outer_loop.py`** — `run(bus, agent)` awaits the agent's own inbox and
+  routes replies via the bus; `deliver(reply, bus)`. `Agent.create` takes
+  `extra_tools`. `build_system_prompt` passes `has_team` (gated on `send_message`
+  registration, not peer count).
+- [x] **14.7 `prompt.py`** — gated `# Team` section in the static prefix.
+- [x] **14.8 `config.py` / `__main__.py`** — `agents` roster + `allow_spawn`
+  knobs; `--agents` / `--no-spawn` CLI; roster validation (no dups, no `human`).
+- [x] **14.9 `AGENTS.md`** — "Working with Teammates" coordination ethos.
+- [x] **14.10 Tests** — `test_bus.py`, `test_team_tools.py`, `test_team.py` (2
+  multi-agent e2e + single-agent-no-team-tools), plus roster/config + prompt
+  gating tests. **67 pass.** Live 2-agent smoke test against `openai/gpt-5.5`:
+  human→planner→(send_message)→coder→planner→human relay verified.
+
+**Still deferred (unchanged by this milestone):** A2A network transport, a team
+lead / shared task board, cron/scheduling, web search, computer use, a
+policy/permission gate.
+
+---
 ## Deferred by design
 
 These are intentionally **absent** (TODO markers, not built):
 
 - **web search**, computer use / GUI, images, vision
-- **subagent delegation**, teams
-- **A2A (agent-to-agent) network transport** — the mailbox is in-memory now, but
-  behind an interface so a real transport drops in later
-- **cron / scheduling**
-- a **policy / permission gate**
-- the `DONE` signal (replaced by "deliver a message")
-
-See `docs/comparison.html` §09 for the merged-architecture blueprint this milestone
-implements.
+- **cross-process / network transport** — the team is in-process and that is the
+  intended scope; there are no external/remote agents

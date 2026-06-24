@@ -19,11 +19,12 @@ Section order (each gated on relevance):
   2. Operating loop          — always
   3. Tools                   — only if tools present
   4. Memory                  — only if a memory workspace is configured
-  5. Behavior & altitude     — always (imported from Claude Code)
-  6. Autonomy & pacing       — always (imported from Claude Code)
+  5. Team                    — only if other peers are reachable (a team)
+  6. Behavior & altitude     — always (imported from Claude Code)
+  7. Autonomy & pacing       — always (imported from Claude Code)
   -- CACHE_BOUNDARY --
-  7. Project Context         — bootstrap files (AGENTS.md, curated memory)
-  8. Runtime context         — date / peers / cwd (volatile; below the boundary)
+  8. Project Context         — bootstrap files (AGENTS.md, curated memory)
+  9. Runtime context         — date / peers / cwd (volatile; below the boundary)
 """
 
 from __future__ import annotations
@@ -165,6 +166,39 @@ def _memory(has_memory: bool) -> list[str]:
     ]
 
 
+def _team() -> list[str]:
+    """Team section. Absent when this agent has no reachable teammates.
+
+    "Absence is the signal": a lone agent is never told about a team it isn't
+    part of. The section only appears once the runtime context shows more than
+    the one peer who last addressed it.
+    """
+    return [
+        "# Team",
+        "",
+        "You are one participant among several, all equal operators. Every "
+        "participant — each agent and the human operator — has a name and is "
+        "addressed by it; the names you can reach are listed under Runtime "
+        "context. Coordination is by message; there is no lead and no shared task "
+        "board.",
+        "",
+        "- Your plain-text reply goes to whoever last addressed you. To reach any "
+        "other participant — by name, or `*` to broadcast to all teammates — use "
+        "`send_message`. That does not end your turn.",
+        "- A message you receive arrives as a new activation tagged "
+        "`[message from <name>]`. To reply to it, address that sender by name.",
+        "- Delegate work that genuinely benefits from another agent. Brief a "
+        "teammate like a colleague who just walked in — they have none of your "
+        "context. Don't delegate trivial things you can just do, and don't sit "
+        "idle waiting on a teammate: do other useful work, or sleep on a tick.",
+        "- If a teammate would help but doesn't exist yet, `spawn_agent` brings "
+        "one online. Reuse an existing teammate before spawning a duplicate.",
+        "- Trust teammates' results; don't second-guess work you delegated "
+        "unless something looks wrong. Report outcomes faithfully across the team.",
+        "",
+    ]
+
+
 def _behavior() -> list[str]:
     """Behavior & altitude — imported from Claude Code (# Doing tasks etc.),
     re-pointed from "the user" to "the requesting peer / the durable log."
@@ -254,11 +288,13 @@ def _runtime_context(runtime: RuntimeContext | None) -> list[str]:
     lines = ["# Runtime context", ""]
     if runtime.date:
         lines.append(f"- Current date: {runtime.date}")
-    lines.append(f"- Your agent id: {runtime.agent_id}")
+    lines.append(f"- Your name: {runtime.agent_id}")
     if runtime.cwd:
         lines.append(f"- Working directory: {runtime.cwd}")
     if runtime.peers:
-        lines.append(f"- Reachable peers: {', '.join(runtime.peers)}")
+        lines.append(
+            f"- Participants you can message by name: {', '.join(runtime.peers)}"
+        )
     if runtime.curated_path:
         lines.append(f"- Curated memory file (read/write via bash): {runtime.curated_path}")
     if runtime.memory_dir:
@@ -280,6 +316,7 @@ def build_prompt(
     context_files: list[ContextFile] | None = None,
     runtime: RuntimeContext | None = None,
     has_memory: bool = False,
+    has_team: bool = False,
 ) -> str:
     """Assemble the system prompt from gated sections.
 
@@ -292,6 +329,8 @@ def build_prompt(
             the cache boundary. None omits it.
         has_memory: Whether a memory workspace is configured. False omits the
             Memory section (absence is the signal).
+        has_team: Whether this agent has reachable teammates. False omits the
+            Team section — a lone agent is never told about a team.
 
     Returns:
         The assembled prompt string, with ``CACHE_BOUNDARY`` separating the
@@ -302,6 +341,8 @@ def build_prompt(
     static += _operating_loop()
     static += _tools(tool_summaries or {})
     static += _memory(has_memory)
+    if has_team:
+        static += _team()
     static += _behavior()
     static += _autonomy()
 

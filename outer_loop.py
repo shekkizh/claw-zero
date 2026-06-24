@@ -1,11 +1,16 @@
-"""Outer loop — the self-owned loop that never returns.
+"""Outer loop — one agent's self-owned loop that never returns.
 
-Owns the durable cross-activation state (the running conversation, transcript,
-memory store, flush bookkeeping, tool registry) and the system-prompt assembly.
-It waits for the next message — from a human peer, an agent peer, or a self-tick
-— appends it to the conversation, runs one inner-loop activation, and delivers
-the reply by routing ``reply.recipient`` to that peer's ``outbound()``. Then it
-loops, forever. There is no exit condition.
+Owns the durable cross-activation state for a single agent (the running
+conversation, transcript, memory store, flush bookkeeping, tool registry) and
+the system-prompt assembly. Each turn it waits for the next message **on its own
+inbox** — from the operator, a teammate agent, or a self-tick — appends it to the
+conversation, runs one inner-loop activation, and delivers the reply by routing
+``reply.recipient`` through the shared ``MessageBus``. Then it loops, forever.
+
+A *team* runs one of these loops per agent, all sharing one bus (see
+``team.py``). A single-agent run is the degenerate case: one loop, one agent,
+the operator as the only external participant. Nothing here branches on *who* the
+sender is — routing is purely by recipient name (the equal-operator thesis).
 
 "Sleep" on a tick is just an activation that returns empty text: the loop
 delivers nothing and goes back to waiting. The agent itself decides that, per the
@@ -26,21 +31,21 @@ from .inner_loop import ActivationContext
 from .llm import resolve_context_window
 from .memory.flush import FlushState
 from .memory.store import MemoryStore
-from .messaging.mailbox import Mailbox, Message
-from .messaging.peer import Peer
+from .messaging.bus import MessageBus
+from .messaging.mailbox import Message
 from .prompt import ContextFile, RuntimeContext, build_prompt
 from .tools.bash import BashTool
-from .tools.registry import ToolRegistry, build_tools
+from .tools.registry import Tool, ToolRegistry, build_tools
 
 
 @dataclass
 class Agent:
     """The durable, self-owned agent: config + cross-activation state.
 
-    One ``Agent`` lives for the whole process. Its ``messages`` list is the
-    persistent conversation that the inner loop mutates and the compaction
-    pipeline shrinks — claw-zero is long-running, so this is not rebuilt per
-    activation.
+    One ``Agent`` lives for the whole process (or, in a team, for as long as that
+    teammate is online). Its ``messages`` list is the persistent conversation
+    that the inner loop mutates and the compaction pipeline shrinks — claw-zero
+    is long-running, so this is not rebuilt per activation.
     """
 
     agent_id: str
@@ -69,11 +74,15 @@ class Agent:
         cwd: str | None = None,
         agents_md: str | None = None,
         context_window: int | None = None,
+        extra_tools: list[Tool] | None = None,
     ) -> "Agent":
-        """Wire up an Agent with its memory store, transcript, and bash tool.
+        """Wire up an Agent with its memory store, transcript, and tools.
 
         ``agents_md`` (the loaded ``AGENTS.md`` text) is injected as a context
-        file. The session log and transcript session header are initialized here.
+        file. ``extra_tools`` are appended after ``bash`` — the team tools
+        (``send_message``, ``spawn_agent``) come in this way, so a single-agent
+        run that passes none simply has the original one-tool surface. The
+        session log and transcript session header are initialized here.
         ``context_window`` overrides the model-resolved window when given.
         """
         memory_store = MemoryStore(agent_id=agent_id, base_dir=base_dir)
@@ -81,7 +90,10 @@ class Agent:
         transcript = Transcript(agent_id=agent_id, base_dir=base_dir)
         transcript.init_session(model=model)
 
-        tools = build_tools(BashTool(cwd=cwd, max_output_chars=max_tool_result_chars))
+        tools = build_tools(
+            BashTool(cwd=cwd, max_output_chars=max_tool_result_chars),
+            *(extra_tools or []),
+        )
 
         context_files: list[ContextFile] = []
         if agents_md:
@@ -108,6 +120,7 @@ class Agent:
         Re-reads curated memory each turn so a freshly-written ``AGENT_MEMORY.md``
         is reflected. Volatile bits (date, peers, cwd) sit below the cache
         boundary; the static prefix stays byte-stable for prompt caching.
+        ``peers`` is this agent's currently-reachable names (teammates + operator).
         """
         context_files = [cf for cf in self.context_files if cf.path != "AGENT_MEMORY.md"]
         curated = self.memory_store.read_curated()
@@ -127,6 +140,11 @@ class Agent:
             context_files=context_files,
             runtime=runtime,
             has_memory=True,
+            # Gate on tool presence, not the live peer count: the Team section is
+            # in the cached static prefix, so it must be stable for the agent's
+            # whole life. ``send_message`` is registered iff this agent is on a
+            # team, and tool registration never changes after creation.
+            has_team="send_message" in self.tools.summaries,
         )
 
     def _cwd(self) -> str:
@@ -134,10 +152,6 @@ class Agent:
         # The handler is BashTool.run (bound method); reach its instance's cwd.
         instance = getattr(bash, "__self__", None)
         return getattr(instance, "cwd", "") if instance is not None else ""
-
-
-def _peer_ids(peers: list[Peer]) -> list[str]:
-    return [p.id for p in peers]
 
 
 def _incoming_text(msg: Message) -> str:
@@ -151,41 +165,37 @@ def _incoming_text(msg: Message) -> str:
     return f"[message from {msg.sender}]\n{msg.content}"
 
 
-async def deliver(reply: Message, peers: list[Peer]) -> bool:
-    """Route a reply to the peer named by ``reply.recipient``.
+async def deliver(reply: Message, bus: MessageBus) -> bool:
+    """Route a reply to its recipient via the bus.
 
     Returns True if delivered. An empty reply (a "sleep") is never delivered.
-    A reply to an unknown recipient is dropped with a warning (no peer to send to).
+    A reply to an unknown recipient is dropped by the bus with a warning.
     """
     if not reply.content.strip():
         return False  # sleep — deliver nothing
-    for peer in peers:
-        if peer.id == reply.recipient:
-            await peer.outbound(reply)
-            return True
-    print(f"[outer_loop] no peer for recipient {reply.recipient!r}; reply dropped")
-    return False
+    return await bus.route(reply)
 
 
 async def run(
-    mailbox: Mailbox,
-    peers: list[Peer],
+    bus: MessageBus,
     agent: Agent,
     *,
     idle: asyncio.Event | None = None,
 ) -> None:
-    """The forever loop: receive → activate → deliver. Never returns on its own.
+    """One agent's forever loop: receive → activate → deliver. Never returns.
 
-    ``idle`` (optional) is set whenever the loop is blocked waiting for a message
-    with nothing in flight, and cleared while an activation runs. A supervisor
-    (e.g. ``__main__`` on stdin EOF) can wait on it to tear down *between*
+    Awaits ``agent``'s own inbox on the shared ``bus`` and routes each reply back
+    through the bus, so a teammate's reply reaches another teammate's inbox the
+    same way a reply reaches the operator. ``idle`` (optional) is set whenever this
+    loop is blocked waiting with nothing in flight, and cleared while an
+    activation runs — a supervisor can wait on it to tear down between
     activations rather than cancelling one mid-flight.
     """
-    peer_ids = _peer_ids(peers)
+    inbox = bus.inbox(agent.agent_id)
     while True:
         if idle is not None:
             idle.set()
-        msg = await mailbox.receive()
+        msg = await inbox.receive()
         if idle is not None:
             idle.clear()
 
@@ -193,14 +203,14 @@ async def run(
         # entirely and go straight to that message (no point waking up to think
         # when there's concrete work waiting). Otherwise the tick becomes an
         # activation and the agent decides whether to act or "sleep" (reply empty).
-        if msg.kind == "tick" and mailbox.has_pending():
+        if msg.kind == "tick" and inbox.has_pending():
             continue
 
         # Append the incoming message to the durable conversation.
         agent.messages.append({"role": "user", "content": _incoming_text(msg)})
         agent.transcript.append_message("user", _incoming_text(msg))
 
-        system_prompt = agent.build_system_prompt(peer_ids)
+        system_prompt = agent.build_system_prompt(bus.reachable_from(agent.agent_id))
         ctx = ActivationContext(
             model=agent.model,
             system_prompt=system_prompt,
@@ -217,5 +227,5 @@ async def run(
         )
 
         reply = await inner_loop.run(ctx)
-        await deliver(reply, peers)
+        await deliver(reply, bus)
         # loop forever; no exit condition

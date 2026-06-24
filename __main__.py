@@ -1,13 +1,14 @@
 """Entry point — ``python -m claw_zero``.
 
-Wires up config → mailbox → StdioPeer (+ optional self-tick) → memory store →
-prompt → tools → outer loop, then runs the self-owned loop forever. The human is
-just a peer over stdio. API keys are read from the environment by litellm — never
-from config or argv.
+Wires up config → Team (bus + one or more agents) → human StdioPeer (+ optional
+self-tick) → memory → prompt → tools, then runs the team until stdin closes. The
+human is just a peer over stdio; agents are equal peers on the same bus. API keys
+are read from the environment by litellm — never from config or argv.
 
 Usage:
     OPENAI_API_KEY=... python -m claw_zero
     python -m claw_zero --model anthropic/claude-opus-4-8 --tick-seconds 60
+    python -m claw_zero --agents planner,coder,reviewer   # a team of four
 """
 
 from __future__ import annotations
@@ -17,9 +18,8 @@ import asyncio
 from pathlib import Path
 
 from .config import ClawZeroConfig
-from .messaging.mailbox import Mailbox
-from .messaging.peer import StdioPeer, tick_source
-from .outer_loop import Agent, run
+from .messaging.peer import StdioPeer
+from .team import Team
 
 
 def _load_agents_md() -> str | None:
@@ -32,10 +32,22 @@ def _load_agents_md() -> str | None:
 
 
 def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
-    parser = argparse.ArgumentParser(prog="claw-zero", description="A self-owned, long-running agent loop.")
+    parser = argparse.ArgumentParser(prog="claw-zero", description="A self-owned, long-running agent loop (single agent or a team).")
     parser.add_argument("--model", default=ClawZeroConfig.model, help="LiteLLM model id (default: %(default)s)")
     parser.add_argument("--agent-id", default=ClawZeroConfig.agent_id, help="This agent's id (default: %(default)s)")
-    parser.add_argument("--tick-seconds", type=float, default=None, help="Self-tick interval (default: off)")
+    parser.add_argument(
+        "--operator-id", default=ClawZeroConfig.operator_id,
+        help="Your participant name on the bus; agents address you by it (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--agents", default="",
+        help="Comma-separated extra teammate ids to launch at startup (a flat peer mesh). Default: none (single agent).",
+    )
+    parser.add_argument(
+        "--no-spawn", action="store_true",
+        help="Disallow runtime spawning of new teammates (drops the spawn_agent tool).",
+    )
+    parser.add_argument("--tick-seconds", type=float, default=None, help="Self-tick interval, applied to every agent (default: off)")
     parser.add_argument("--base-dir", default=None, help="State root (default: claw_zero_state)")
     parser.add_argument(
         "--compaction-threshold", type=float, default=ClawZeroConfig.compaction_threshold,
@@ -47,9 +59,13 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
     )
     parser.add_argument("--context-window-tokens", type=int, default=None, help="Override resolved context window")
     args = parser.parse_args(argv)
+    roster = [a.strip() for a in args.agents.split(",") if a.strip()]
     return ClawZeroConfig(
         model=args.model,
         agent_id=args.agent_id,
+        operator_id=args.operator_id,
+        agents=roster,
+        allow_spawn=not args.no_spawn,
         tick_seconds=args.tick_seconds,
         base_dir=args.base_dir,
         compaction_threshold=args.compaction_threshold,
@@ -59,59 +75,35 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
 
 
 async def _run(config: ClawZeroConfig) -> None:
-    mailbox = Mailbox()
-    human = StdioPeer(peer_id="human", agent_id=config.agent_id)
-    peers = [human]
+    team = Team(config, agents_md=_load_agents_md(), allow_spawn=config.allow_spawn)
 
-    agent = Agent.create(
-        agent_id=config.agent_id,
-        model=config.model,
-        base_dir=config.base_dir,
-        compaction_threshold=config.compaction_threshold,
-        max_tool_result_chars=config.max_tool_result_chars,
-        agents_md=_load_agents_md(),
-        context_window=config.context_window_tokens,
-    )
+    # The primary agent plus any roster teammates. Your typed lines reach the
+    # primary by default; address any other agent by name (`@name` / `name:`).
+    team.add_agent(config.agent_id, config.model)
+    for name in config.agents:
+        team.add_agent(name, config.model)
 
+    operator = StdioPeer(peer_id=config.operator_id, default_recipient=config.agent_id)
+    team.add_peer(operator)
+
+    roster = team.agent_ids
+    if len(roster) == 1:
+        who = f"agent [{config.agent_id}]"
+    else:
+        who = f"team of {len(roster)} [{', '.join(roster)}]"
     print(
-        f"claw-zero [{config.agent_id}] online — model {config.model}, "
-        f"context window {agent.context_window:,} tokens. "
-        "Type a message; Ctrl-D or Ctrl-C to exit.",
+        f"claw-zero {who} online — model {config.model}, "
+        f"context window {team.context_window_of(config.agent_id):,} tokens. "
+        f"You are '{config.operator_id}'. "
+        + (
+            "Type a message; prefix with `@name` or `name:` to address one agent. "
+            if len(roster) > 1 else "Type a message. "
+        )
+        + "Ctrl-D or Ctrl-C to exit.",
         flush=True,
     )
 
-    idle = asyncio.Event()
-    inbound_task = asyncio.create_task(human.inbound(mailbox))
-    extra_tasks = []
-    if config.tick_seconds is not None:
-        extra_tasks.append(
-            asyncio.create_task(tick_source(mailbox, config.tick_seconds, agent_id=config.agent_id))
-        )
-
-    loop_task = asyncio.create_task(run(mailbox, peers, agent, idle=idle))
-    try:
-        # The outer loop never returns on its own; we begin shutdown when stdin
-        # closes (the inbound task finishes).
-        await inbound_task
-        # Graceful drain: let any queued messages and the in-flight activation
-        # finish, so we never cancel a model call mid-flight. We're done once the
-        # mailbox is empty AND the loop is sitting idle.
-        while mailbox.has_pending() or not idle.is_set():
-            try:
-                await asyncio.wait_for(idle.wait(), timeout=0.2)
-            except asyncio.TimeoutError:
-                pass
-            if not mailbox.has_pending() and idle.is_set():
-                break
-    finally:
-        loop_task.cancel()
-        for task in extra_tasks:
-            task.cancel()
-        for task in [loop_task, *extra_tasks]:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    await team.run_until_eof(operator)
 
 
 def main(argv: list[str] | None = None) -> None:

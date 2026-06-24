@@ -12,7 +12,7 @@ environment. This module imports nothing heavy (no ``litellm``, no ``cua-*``).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -21,6 +21,20 @@ class ClawZeroConfig:
 
     model: str = "openai/gpt-5.5"
     """LiteLLM-format model id (provider/name). Effort is always max."""
+
+    agents: list[str] = field(default_factory=list)
+    """Extra teammate ids to launch at startup, beyond ``agent_id`` (the static
+    roster). Empty → a single-agent run. Each shares ``model`` unless a runtime
+    spawn overrides it. All run as equal peers on one bus (a flat mesh)."""
+
+    allow_spawn: bool = True
+    """Whether agents may bring new teammates online at runtime via the
+    ``spawn_agent`` tool. The tool is only registered when this is True."""
+
+    operator_id: str = "operator"
+    """The human operator's participant name. The human is a named participant on
+    the bus, addressed by this name like any agent — not a generic "human" role.
+    Other participants reach them with this id (e.g. ``send_message(to=...)``)."""
 
     context_window_tokens: int | None = None
     """Override the resolved context window. None → resolve from the model
@@ -60,3 +74,19 @@ class ClawZeroConfig:
             )
         if not self.agent_id.strip():
             raise ValueError("agent_id must be a non-empty string")
+        if not self.operator_id.strip():
+            raise ValueError("operator_id must be a non-empty string")
+        # Every participant name on the bus must be unique: the operator, the
+        # primary agent, and each roster teammate. Names are how the bus routes,
+        # so a collision would make a message ambiguous.
+        if self.agent_id == self.operator_id:
+            raise ValueError(
+                f"agent_id and operator_id must differ (both {self.agent_id!r})"
+            )
+        seen = {self.agent_id, self.operator_id}
+        for name in self.agents:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"agent ids must be non-empty strings, got {name!r}")
+            if name in seen:
+                raise ValueError(f"duplicate participant name {name!r} (clashes with operator or another agent)")
+            seen.add(name)

@@ -1,16 +1,16 @@
-"""Mailbox — the in-memory, equal-operator message channel.
+"""Mailbox — one agent's in-memory inbox.
 
 Ports the *shape* of Claude Code's mailbox
 (`claude-code/utils/mailbox.ts`: send / receive / poll) onto an
 ``asyncio.Queue`` (ALE Claw already uses ``asyncio.Queue`` for subagent
-results — same idea). This is the **only** channel claw-zero uses: a human peer,
-another agent, and the self-tick source all enqueue ``Message`` objects here, and
-the agent dequeues them uniformly. Nothing downstream branches on *who* the
-sender is — see the design check in the Phase 1 brief.
+results — same idea). Each agent owns one of these; a human peer, another agent,
+and the self-tick source all enqueue ``Message`` objects here, and the agent
+dequeues them uniformly. Nothing downstream branches on *who* the sender is.
 
-The transport is deliberately behind this thin interface so a real agent-to-agent
-(A2A) transport can drop in later. **A2A substrate is explicitly deferred — not
-built here.**
+This is the substrate of claw-zero's agent-to-agent messaging: agents exchange
+``Message`` objects through their mailboxes (routed by ``MessageBus``), so an
+agent talking to another agent and an agent talking to the human are the same
+operation. Everything is in-process — there is no network layer, by design.
 """
 
 from __future__ import annotations
@@ -29,14 +29,14 @@ def _new_message_id() -> str:
 class Message:
     """A single message moving through the mailbox.
 
-    A human and an agent produce structurally identical messages — the only
+    The operator and an agent produce structurally identical messages — the only
     field the loop is allowed to branch on is ``kind`` (``"tick"`` vs
     ``"message"``), never ``sender``.
 
     Attributes:
-        sender: Peer id of the originator, e.g. ``"human"``, an agent name, or
+        sender: Name of the originator — an agent's id, the operator's name, or
             ``"self"`` for a tick. **Not special-cased** anywhere in the loop.
-        recipient: This agent's id (for inbound) or a peer id (for outbound).
+        recipient: The participant name this message is addressed to.
         content: The message body (plain text).
         kind: ``"message"`` | ``"tick"``. Room to grow; treat uniformly except
             for the one allowed tick/message branch.
