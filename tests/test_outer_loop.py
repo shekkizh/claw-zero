@@ -1,29 +1,35 @@
-"""Phase 8 — end-to-end outer loop: receive -> activate -> deliver; runs forever."""
+"""Phase 8 — end-to-end outer loop: receive -> activate -> deliver; runs forever.
+
+Now bus-routed: an agent awaits its own inbox on a shared MessageBus and routes
+replies back through the bus. A single-agent run registers one agent + the human
+peer; routing is by recipient (no sender special-casing).
+"""
 
 import asyncio
 
 from claw_zero import llm, outer_loop
-from claw_zero.messaging.mailbox import Mailbox, Message
+from claw_zero.messaging.bus import MessageBus
+from claw_zero.messaging.mailbox import Message
 from claw_zero.outer_loop import Agent, deliver
 
 
 class FakePeer:
-    """A peer that records delivered messages instead of printing to stdout."""
+    """An external peer that records delivered messages instead of printing."""
 
-    def __init__(self, peer_id="human"):
+    def __init__(self, peer_id="operator"):
         self.id = peer_id
         self.delivered: list[Message] = []
 
-    async def inbound(self, mailbox):  # not used in these tests
+    async def inbound(self, bus):  # not used in these tests
         return
 
     async def outbound(self, msg: Message) -> None:
         self.delivered.append(msg)
 
 
-def _agent(tmp_path) -> Agent:
+def _agent(tmp_path, agent_id="claw-zero") -> Agent:
     return Agent.create(
-        agent_id="claw-zero",
+        agent_id=agent_id,
         model="openai/gpt-5.5",
         base_dir=str(tmp_path),
         cwd=str(tmp_path),
@@ -40,14 +46,16 @@ def test_two_messages_two_replies_and_never_exits(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "call", fake_call)
 
     async def scenario():
-        mailbox = Mailbox()
-        peer = FakePeer("human")
+        bus = MessageBus()
+        peer = FakePeer("operator")
+        bus.add_peer(peer)
         agent = _agent(tmp_path)
+        bus.add_agent(agent.agent_id)
 
-        loop_task = asyncio.create_task(outer_loop.run(mailbox, [peer], agent))
+        loop_task = asyncio.create_task(outer_loop.run(bus, agent))
 
-        await mailbox.send(Message(sender="human", recipient="claw-zero", content="first"))
-        await mailbox.send(Message(sender="human", recipient="claw-zero", content="second"))
+        await bus.route(Message(sender="operator", recipient="claw-zero", content="first"))
+        await bus.route(Message(sender="operator", recipient="claw-zero", content="second"))
 
         # Wait until both replies are delivered (the loop processes FIFO).
         for _ in range(200):
@@ -65,7 +73,7 @@ def test_two_messages_two_replies_and_never_exits(tmp_path, monkeypatch):
 
     delivered = asyncio.run(scenario())
     assert len(delivered) == 2
-    assert all(m.sender == "claw-zero" and m.recipient == "human" for m in delivered)
+    assert all(m.sender == "claw-zero" and m.recipient == "operator" for m in delivered)
     assert "first" in delivered[0].content
     assert "second" in delivered[1].content
 
@@ -78,12 +86,14 @@ def test_tick_sleep_delivers_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "call", fake_call)
 
     async def scenario():
-        mailbox = Mailbox()
-        peer = FakePeer("human")
+        bus = MessageBus()
+        peer = FakePeer("operator")
+        bus.add_peer(peer)
         agent = _agent(tmp_path)
-        loop_task = asyncio.create_task(outer_loop.run(mailbox, [peer], agent))
+        bus.add_agent(agent.agent_id)
+        loop_task = asyncio.create_task(outer_loop.run(bus, agent))
 
-        await mailbox.send(Message(sender="self", recipient="claw-zero", content="", kind="tick"))
+        await bus.route(Message(sender="self", recipient="claw-zero", content="", kind="tick"))
         await asyncio.sleep(0.2)
 
         assert not loop_task.done()
@@ -98,19 +108,29 @@ def test_tick_sleep_delivers_nothing(tmp_path, monkeypatch):
     assert delivered == []  # sleeping delivers nothing
 
 
-def test_deliver_routes_by_recipient():
+def test_deliver_routes_by_recipient(tmp_path):
     async def scenario():
-        a = FakePeer("human")
-        b = FakePeer("agent-b")
-        # Route to agent-b specifically.
-        ok = await deliver(Message(sender="claw-zero", recipient="agent-b", content="hi"), [a, b])
+        bus = MessageBus()
+        a = FakePeer("operator")
+        bus.add_peer(a)
+        # An agent recipient routes to its inbox (not an external peer).
+        inbox_b = bus.add_agent("agent-b")
+
+        ok = await deliver(Message(sender="claw-zero", recipient="agent-b", content="hi"), bus)
         assert ok is True
-        assert a.delivered == [] and len(b.delivered) == 1
+        assert a.delivered == [] and inbox_b.has_pending()
+
         # Empty content is a sleep — never delivered.
-        ok2 = await deliver(Message(sender="claw-zero", recipient="human", content="   "), [a, b])
+        ok2 = await deliver(Message(sender="claw-zero", recipient="operator", content="   "), bus)
         assert ok2 is False
+        assert a.delivered == []
+
+        # A real reply to the human routes to its outbound.
+        ok3 = await deliver(Message(sender="claw-zero", recipient="operator", content="done"), bus)
+        assert ok3 is True and len(a.delivered) == 1
+
         # Unknown recipient -> dropped, not crashed.
-        ok3 = await deliver(Message(sender="claw-zero", recipient="ghost", content="hi"), [a, b])
-        assert ok3 is False
+        ok4 = await deliver(Message(sender="claw-zero", recipient="ghost", content="hi"), bus)
+        assert ok4 is False
 
     asyncio.run(scenario())

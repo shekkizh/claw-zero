@@ -14,7 +14,7 @@ from claw_zero.tools.registry import build_tools
 
 def _make_ctx(tmp_path, incoming_content: str) -> ActivationContext:
     registry = build_tools(BashTool(cwd=str(tmp_path)))
-    incoming = Message(sender="human", recipient="claw-zero", content=incoming_content)
+    incoming = Message(sender="operator", recipient="claw-zero", content=incoming_content)
     messages = [{"role": "user", "content": incoming_content}]
     return ActivationContext(
         model="openai/gpt-5.5",
@@ -55,7 +55,7 @@ def test_activation_runs_bash_then_delivers_message(tmp_path, monkeypatch):
 
     assert isinstance(delivered, Message)
     assert delivered.sender == "claw-zero"
-    assert delivered.recipient == "human"
+    assert delivered.recipient == "operator"
     assert "hello" in delivered.content
     assert calls["n"] == 2  # one tool turn + one reply turn
 
@@ -74,7 +74,7 @@ def test_activation_with_no_tool_call_delivers_immediately(tmp_path, monkeypatch
     monkeypatch.setattr(llm, "call", fake_call)
     delivered = asyncio.run(inner_loop.run(ctx))
     assert delivered.content == "hi there"
-    assert delivered.recipient == "human"
+    assert delivered.recipient == "operator"
 
 
 def test_unknown_tool_is_reported_not_crashed(tmp_path, monkeypatch):

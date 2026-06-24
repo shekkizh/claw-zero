@@ -9,7 +9,7 @@ def test_send_three_receive_three_fifo():
     async def run():
         mb = Mailbox()
         for i in range(3):
-            await mb.send(Message(sender="human", recipient="claw-zero", content=f"m{i}"))
+            await mb.send(Message(sender="operator", recipient="claw-zero", content=f"m{i}"))
         got = [(await mb.receive()).content for _ in range(3)]
         return got
 

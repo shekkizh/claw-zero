@@ -29,6 +29,42 @@ def test_validation_rejects_bad_values():
         ClawZeroConfig(agent_id="  ")
 
 
+def test_roster_defaults_empty_and_spawn_on():
+    c = ClawZeroConfig()
+    assert c.agents == []
+    assert c.allow_spawn is True
+    assert c.operator_id == "operator"
+
+
+def test_roster_validation():
+    # A clean roster is accepted.
+    ClawZeroConfig(agent_id="lead", agents=["planner", "coder"])
+    # Duplicate of the primary agent id.
+    with pytest.raises(ValueError):
+        ClawZeroConfig(agent_id="lead", agents=["lead"])
+    # Duplicate within the roster.
+    with pytest.raises(ValueError):
+        ClawZeroConfig(agents=["a", "a"])
+    # Empty id in the roster.
+    with pytest.raises(ValueError):
+        ClawZeroConfig(agents=["  "])
+
+
+def test_operator_name_must_be_unique_and_nonempty():
+    # Operator name collides with the primary agent.
+    with pytest.raises(ValueError):
+        ClawZeroConfig(agent_id="lead", operator_id="lead")
+    # Operator name collides with a roster teammate.
+    with pytest.raises(ValueError):
+        ClawZeroConfig(agent_id="lead", operator_id="alex", agents=["alex"])
+    # Empty operator name.
+    with pytest.raises(ValueError):
+        ClawZeroConfig(operator_id="  ")
+    # A custom operator name that doesn't collide is fine.
+    c = ClawZeroConfig(agent_id="lead", operator_id="alex", agents=["coder"])
+    assert c.operator_id == "alex"
+
+
 def test_no_effort_knob():
     # Effort is always max via the thinking layer — config must not expose it.
     fields = ClawZeroConfig().__dataclass_fields__

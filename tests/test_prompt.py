@@ -32,6 +32,21 @@ def test_with_tools_and_memory_sections_appear():
     assert "file tool" in out
 
 
+def test_team_section_gated_on_has_team():
+    # Absent for a lone agent (absence is the signal).
+    solo = build_prompt(tool_summaries={"bash": "x"}, has_memory=True, has_team=False)
+    assert "# Team" not in solo
+    # Present once the agent is on a team.
+    team = build_prompt(
+        tool_summaries={"bash": "x", "send_message": "y"}, has_memory=True, has_team=True,
+    )
+    assert "# Team" in team
+    assert "send_message" in team
+    # Team section lives in the byte-stable prefix (above the cache boundary) so
+    # it stays cached for the agent's whole life.
+    assert CACHE_BOUNDARY not in team or "# Team" in team.split(CACHE_BOUNDARY, 1)[0]
+
+
 def test_cache_boundary_separates_static_from_volatile():
     out = build_prompt(
         tool_summaries={"bash": "Run a shell command locally."},
