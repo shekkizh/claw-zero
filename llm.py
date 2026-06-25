@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-REASONING: dict[str, str] = {"effort": "xhigh"}
+REASONING: dict[str, str] = {"effort": "xhigh", "summary": "auto"}
 """The fixed reasoning setting for every model call."""
 
 DEFAULT_CONTEXT_TOKENS = 200_000
@@ -252,6 +252,16 @@ def _dump_item(item: Any) -> dict[str, Any]:
         if action is not None:
             dumped["action"] = _dump_web_search_action(action)
         return dumped
+    if item_type == "reasoning":
+        dumped = {
+            "type": "reasoning",
+            "id": getattr(item, "id", ""),
+            "summary": [_dump_summary_part(part) for part in getattr(item, "summary", None) or []],
+        }
+        status = getattr(item, "status", "")
+        if status:
+            dumped["status"] = status
+        return dumped
     return {"type": item_type}
 
 
@@ -278,6 +288,17 @@ def _dump_annotation(annotation: Any) -> dict[str, Any]:
         "title": getattr(annotation, "title", ""),
         "start_index": getattr(annotation, "start_index", None),
         "end_index": getattr(annotation, "end_index", None),
+    }
+
+
+def _dump_summary_part(part: Any) -> dict[str, Any]:
+    if isinstance(part, dict):
+        return dict(part)
+    if hasattr(part, "model_dump"):
+        return part.model_dump(exclude_none=True)
+    return {
+        "type": getattr(part, "type", ""),
+        "text": getattr(part, "text", ""),
     }
 
 

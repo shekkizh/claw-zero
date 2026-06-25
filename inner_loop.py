@@ -131,6 +131,24 @@ def _transcript_web_search_calls(response_items: list[dict[str, Any]]) -> list[d
     return calls
 
 
+def _transcript_reasoning_summaries(response_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for item in response_items:
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        summary = item.get("summary")
+        if not isinstance(summary, list) or not summary:
+            continue
+        reasoning_summary: dict[str, Any] = {
+            "id": item.get("id", ""),
+            "summary": [part for part in summary if isinstance(part, dict)],
+        }
+        if item.get("status"):
+            reasoning_summary["status"] = item["status"]
+        summaries.append(reasoning_summary)
+    return summaries
+
+
 def _transcript_tool_results(result: "llm.LLMResult") -> list[dict[str, Any]]:
     """Build transcript metadata for hosted tool results returned in-place."""
     web_call_ids = [
@@ -311,6 +329,7 @@ async def run(ctx: ActivationContext) -> Message:
 
         # 3. Append the assistant turn to messages + transcript.
         assistant_msg = _assistant_message(result)
+        reasoning_summaries = _transcript_reasoning_summaries(result.response_items)
         transcript_tool_calls = _transcript_tool_calls(result)
         transcript_tool_results = _transcript_tool_results(result)
         ctx.messages.append(assistant_msg)
@@ -319,6 +338,7 @@ async def run(ctx: ActivationContext) -> Message:
             assistant_msg.get("content") or "",
             usage=result.usage or None,
             stop_reason=result.finish_reason or None,
+            reasoning_summaries=reasoning_summaries,
             tool_calls=transcript_tool_calls,
             tool_results=transcript_tool_results,
         )

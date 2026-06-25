@@ -5,8 +5,8 @@ Trimmed port of the harness ``SessionManager`` JSONL writer
 
   - ``session``    — header: version, agent_id, run_number, model
   - ``message``    — one conversation message (role, content, optional usage,
-                     optional stopReason/toolCalls/toolResults/toolCallId),
-                     chained by ``parentId``
+                     optional stopReason/reasoningSummaries/toolCalls/
+                     toolResults/toolCallId), chained by ``parentId``
   - ``compaction`` — summary, firstKeptEntryId, tokensBefore
 
 Dropped: cross-run ``state.json``, replay, and image entries (claw-zero has no
@@ -73,6 +73,7 @@ class Transcript:
         *,
         usage: dict[str, Any] | None = None,
         stop_reason: str | None = None,
+        reasoning_summaries: list[dict[str, Any]] | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
         tool_results: list[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
@@ -84,6 +85,8 @@ class Transcript:
             message["usage"] = usage
         if stop_reason is not None:
             message["stopReason"] = stop_reason
+        if reasoning_summaries:
+            message["reasoningSummaries"] = reasoning_summaries
         if tool_calls:
             message["toolCalls"] = tool_calls
         if tool_results:

@@ -94,7 +94,7 @@ def test_build_openai_kwargs_maps_parameters():
         "instructions": "SYS\n\nDYNAMIC",
         "max_output_tokens": 123,
         "temperature": 1.0,
-        "reasoning": {"effort": "xhigh"},
+        "reasoning": {"effort": "xhigh", "summary": "auto"},
         "tools": [tool],
         "timeout": 30,
     }
@@ -222,4 +222,26 @@ def test_dump_item_preserves_web_search_call_action_without_model_dump():
         "id": "ws_1",
         "status": "completed",
         "action": {"type": "search", "query": "latest AI news"},
+    }
+
+
+def test_dump_item_preserves_reasoning_summary_without_model_dump():
+    class _Summary:
+        type = "summary_text"
+        text = "Checked the current state and chose the direct fix."
+
+    class _Reasoning:
+        type = "reasoning"
+        id = "rs_1"
+        status = "completed"
+        summary = [_Summary()]
+
+    assert llm._dump_item(_Reasoning()) == {
+        "type": "reasoning",
+        "id": "rs_1",
+        "status": "completed",
+        "summary": [{
+            "type": "summary_text",
+            "text": "Checked the current state and chose the direct fix.",
+        }],
     }

@@ -149,6 +149,50 @@ def test_activation_records_hosted_search_call_and_result(tmp_path, monkeypatch)
     assert assistant["toolResults"][0]["content"][0]["annotations"][0]["title"] == "Example"
 
 
+def test_activation_records_reasoning_summary(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path, "explain the repo state")
+    ctx.transcript.init_session(model=ctx.model)
+
+    async def fake_call(model, messages, **kwargs):
+        return llm.LLMResult(
+            text="Done.",
+            finish_reason="completed",
+            response_items=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{
+                        "type": "summary_text",
+                        "text": "Inspected transcript persistence and selected a schema-only change.",
+                    }],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done.", "annotations": []}],
+                },
+            ],
+        )
+
+    monkeypatch.setattr(llm, "call", fake_call)
+    delivered = asyncio.run(inner_loop.run(ctx))
+
+    assert delivered.content == "Done."
+    lines = [json.loads(line) for line in ctx.transcript.path.read_text().splitlines()]
+    assistant = next(
+        entry["message"]
+        for entry in lines
+        if entry.get("type") == "message" and entry["message"].get("role") == "assistant"
+    )
+    assert assistant["reasoningSummaries"] == [{
+        "id": "rs_1",
+        "summary": [{
+            "type": "summary_text",
+            "text": "Inspected transcript persistence and selected a schema-only change.",
+        }],
+    }]
+
+
 def test_unknown_tool_is_reported_not_crashed(tmp_path, monkeypatch):
     ctx = _make_ctx(tmp_path, "do a thing")
     ctx.transcript.init_session(model=ctx.model)

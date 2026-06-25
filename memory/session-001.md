@@ -164,3 +164,21 @@ the gitignored `claw_zero_state/<agent_id>/memory/`.
   and `tests/test_llm.py`. Verification: focused tests passed (22 tests), full
   `.venv/bin/pytest` passed (72 tests), and `git diff --check` passed for the
   touched files.
+
+## 2026-06-25 Transcript reasoning summary persistence
+
+- Operator requested saving OpenAI reasoning summaries in transcripts.
+- Checked official OpenAI docs: raw reasoning tokens are not exposed, but
+  reasoning summaries are returned when the Responses request includes
+  `reasoning={"effort": ..., "summary": "auto"}`; output appears in the
+  `summary` array of `reasoning` output items.
+- Updated `llm.py` to request `summary: "auto"` with the fixed `xhigh`
+  reasoning effort, and to preserve `reasoning` output items' `id`, `status`,
+  and `summary` when dumping SDK-like objects.
+- Added transcript field `reasoningSummaries`, wired `inner_loop.py` to persist
+  non-empty reasoning summaries on assistant message entries, and added
+  regression tests in `tests/test_llm.py`, `tests/test_context.py`, and
+  `tests/test_inner_loop.py`.
+- Verification: focused LLM/context/inner-loop tests passed (25 tests), full
+  `.venv/bin/pytest` passed (75 tests), and `git diff --check` passed for the
+  touched files.

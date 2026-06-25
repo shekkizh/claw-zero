@@ -212,6 +212,29 @@ def test_transcript_records_hosted_tool_result_metadata(tmp_path):
     assert assistant["toolResults"][0]["content"][0]["annotations"][0]["url"] == "https://example.com"
 
 
+def test_transcript_records_reasoning_summary_metadata(tmp_path):
+    t = Transcript(agent_id="claw-zero", base_dir=tmp_path)
+    t.init_session(model="gpt-5.5")
+    t.append_message(
+        "assistant",
+        "Done.",
+        stop_reason="completed",
+        reasoning_summaries=[{
+            "id": "rs_1",
+            "summary": [{
+                "type": "summary_text",
+                "text": "Checked the current state and chose the direct fix.",
+            }],
+        }],
+    )
+
+    lines = [json.loads(l) for l in t.path.read_text().splitlines() if l.strip()]
+    assistant = lines[1]["message"]
+    assert assistant["reasoningSummaries"][0]["id"] == "rs_1"
+    assert assistant["reasoningSummaries"][0]["summary"][0]["type"] == "summary_text"
+    assert "direct fix" in assistant["reasoningSummaries"][0]["summary"][0]["text"]
+
+
 def test_transcript_run_number_increments(tmp_path):
     t = Transcript(base_dir=tmp_path)
     assert t.init_session() == 1
