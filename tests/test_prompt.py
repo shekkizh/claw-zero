@@ -20,25 +20,25 @@ def test_no_tools_omits_tools_and_memory_sections():
 
 def test_with_tools_and_memory_sections_appear():
     out = build_prompt(
-        tool_summaries={"bash": "Run a shell command locally."},
+        tool_summaries={"shell": "Run shell commands locally."},
         has_memory=True,
     )
     assert "# Tools" in out
-    assert "- **bash**:" in out
+    assert "- **shell**:" in out
     assert "# Memory" in out
     assert "AGENT_MEMORY.md" in out
     assert "session-NNN.md" in out
-    # bash-is-the-file-tool note appears only when bash is present.
+    # shell-is-the-file-tool note appears only when shell is present.
     assert "file tool" in out
 
 
 def test_team_section_gated_on_has_team():
     # Absent for a lone agent (absence is the signal).
-    solo = build_prompt(tool_summaries={"bash": "x"}, has_memory=True, has_team=False)
+    solo = build_prompt(tool_summaries={"shell": "x"}, has_memory=True, has_team=False)
     assert "# Team" not in solo
     # Present once the agent is on a team.
     team = build_prompt(
-        tool_summaries={"bash": "x", "send_message": "y"}, has_memory=True, has_team=True,
+        tool_summaries={"shell": "x", "send_message": "y"}, has_memory=True, has_team=True,
     )
     assert "# Team" in team
     assert "send_message" in team
@@ -49,7 +49,7 @@ def test_team_section_gated_on_has_team():
 
 def test_cache_boundary_separates_static_from_volatile():
     out = build_prompt(
-        tool_summaries={"bash": "Run a shell command locally."},
+        tool_summaries={"shell": "Run shell commands locally."},
         runtime=RuntimeContext(
             date="2026-06-22", agent_id="claw-zero", cwd="/tmp",
             memory_dir="/state/claw-zero/memory",
@@ -62,7 +62,7 @@ def test_cache_boundary_separates_static_from_volatile():
     static, dynamic = out.split(CACHE_BOUNDARY, 1)
     # Volatile content lives BELOW the boundary (cache-safe prefix above).
     assert "2026-06-22" in dynamic
-    # Absolute memory paths are surfaced so the agent can find its files via bash.
+    # Absolute memory paths are surfaced so the agent can find its files via shell.
     assert "/state/claw-zero/memory" in dynamic
     assert "/state/claw-zero/AGENT_MEMORY.md" in dynamic
     assert "2026-06-22" not in static
@@ -74,7 +74,7 @@ def test_cache_boundary_separates_static_from_volatile():
 
 
 def test_no_runtime_or_context_means_no_boundary():
-    out = build_prompt(tool_summaries={"bash": "x"})
+    out = build_prompt(tool_summaries={"shell": "x"})
     # Nothing volatile → no boundary marker emitted, prompt is all-static.
     assert CACHE_BOUNDARY not in out
 
@@ -82,7 +82,7 @@ def test_no_runtime_or_context_means_no_boundary():
 def test_snapshot_stable_prefix_is_byte_stable():
     # Two builds with different volatile context must share an identical prefix
     # (the cache key). This is the property prompt caching relies on.
-    common = dict(tool_summaries={"bash": "Run a shell command locally."}, has_memory=True)
+    common = dict(tool_summaries={"shell": "Run shell commands locally."}, has_memory=True)
     a = build_prompt(**common, runtime=RuntimeContext(date="2026-06-22"))
     b = build_prompt(**common, runtime=RuntimeContext(date="2026-06-23"))
     prefix_a = a.split(CACHE_BOUNDARY, 1)[0]

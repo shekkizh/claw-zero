@@ -8,7 +8,7 @@ build/
 dist/
 
 # Agent runtime state (memory + transcript)
-claw_zero_state/
+claw_zero_state*
 
 .cursor
 

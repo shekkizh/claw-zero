@@ -93,24 +93,22 @@ def should_run_memory_flush(
 # memory_write tool schema offered only during the flush turn.
 _MEMORY_WRITE_TOOL = {
     "type": "function",
-    "function": {
-        "name": "memory_write",
-        "description": (
-            "Write durable memory. target='session' appends to the session log; "
-            "target='curated' overwrites AGENT_MEMORY.md (include everything worth keeping)."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": "The text to persist."},
-                "target": {
-                    "type": "string",
-                    "enum": ["session", "curated"],
-                    "description": "Where to write: 'session' (append) or 'curated' (overwrite).",
-                },
+    "name": "memory_write",
+    "description": (
+        "Write durable memory. target='session' appends to the session log; "
+        "target='curated' overwrites AGENT_MEMORY.md (include everything worth keeping)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "The text to persist."},
+            "target": {
+                "type": "string",
+                "enum": ["session", "curated"],
+                "description": "Where to write: 'session' (append) or 'curated' (overwrite).",
             },
-            "required": ["content"],
         },
+        "required": ["content"],
     },
 }
 

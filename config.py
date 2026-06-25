@@ -2,12 +2,12 @@
 
 Started from the ALE Claw ``config.py`` and stripped of every cua / GUI /
 transport / delegation / web / thinking-level knob. What remains is exactly what
-claw-zero uses. **There is no effort knob** — effort is always max via the
-thinking layer in ``llm.py`` (see ``MAX_EFFORT``).
+claw-zero uses. **There is no effort knob** — ``llm.py`` sends the same fixed
+OpenAI reasoning setting on every call.
 
-API keys are NEVER stored here. litellm reads ``OPENAI_API_KEY`` /
-``ANTHROPIC_API_KEY`` / ``OPENROUTER_API_KEY`` etc. directly from the process
-environment. This module imports nothing heavy (no ``litellm``, no ``cua-*``).
+API keys are NEVER stored here. The OpenAI SDK reads ``OPENAI_API_KEY`` directly
+from the process environment. This module imports nothing heavy (no ``openai``,
+no ``cua-*``).
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 class ClawZeroConfig:
     """Per-run tunables for claw-zero."""
 
-    model: str = "openai/gpt-5.5"
-    """LiteLLM-format model id (provider/name). Effort is always max."""
+    model: str = "gpt-5.5"
+    """Native OpenAI model id. Reasoning is fixed in ``llm.py``."""
 
     agents: list[str] = field(default_factory=list)
     """Extra teammate ids to launch at startup, beyond ``agent_id`` (the static
@@ -38,7 +38,7 @@ class ClawZeroConfig:
 
     context_window_tokens: int | None = None
     """Override the resolved context window. None → resolve from the model
-    (falls back to 200K when litellm can't resolve it)."""
+    (falls back to 200K when no local OpenAI metadata is known)."""
 
     compaction_threshold: float = 0.8
     """Fraction of the context window at which compaction (and the

@@ -1,8 +1,8 @@
 # claw-zero — Implementation TODO / Status
 
 > **Status: built, reorganized, and re-packaged — runnable again.** All 11 phases
-> (0–10) were implemented, committed, and verified — 50 tests green and a live
-> smoke test against `openai/gpt-5.5` (see `memory/session-001.md`). A subsequent
+> (0–10) were implemented, committed, and verified — 68 tests green and a live
+> smoke test against `gpt-5.5` (see `memory/session-001.md`). A subsequent
 > commit (`fca034b "reorganize folders"`) **flattened the package from
 > `claw_zero/` into the repo root** and removed the in-repo `harness/` and
 > `legacy/` snapshots, `pyproject.toml`, and the per-package `PORTING.md`/`README.md`.
@@ -27,17 +27,17 @@
 |---|---|---|
 | 0 | Scaffolding (skeleton, deps, port plan) | ✅ shipped (layout later flattened — see §13) |
 | 1 | Messaging substrate (`mailbox`, `peer`) | ✅ shipped |
-| 2 | LLM core (`llm.py` via litellm) | ✅ shipped |
-| 3 | Tools — exactly one (`bash`, `registry`) | ✅ shipped |
+| 2 | LLM core (`llm.py` via OpenAI SDK) | ✅ shipped |
+| 3 | Tools — OpenAI local `shell` + hosted OpenAI `web_search` | ✅ shipped |
 | 4 | Prompt builder + `AGENTS.md` | ✅ shipped |
 | 5 | Durable memory (`store`, `flush`) | ✅ shipped |
 | 6 | Context & compaction (chat-shape) | ✅ shipped |
 | 7 | Inner loop (one activation → one message) | ✅ shipped |
 | 8 | Outer loop (self-owned, never returns) | ✅ shipped |
 | 9 | Entry point & config | ✅ shipped |
-| 10 | Verify & document | ✅ shipped (50 tests green, live smoke test) |
-| 13 | Post-reorg follow-ups | ✅ done — `pyproject.toml` restored; runnable, 50 tests pass |
-| 14 | **Team of agents** (flat peer mesh) | ✅ shipped — bus + send_message + spawn_agent; 67 tests pass + live 2-agent smoke test |
+| 10 | Verify & document | ✅ shipped (68 tests green, live smoke test) |
+| 13 | Post-reorg follow-ups | ✅ done — `pyproject.toml` restored; runnable, 68 tests pass |
+| 14 | **Team of agents** (flat peer mesh) | ✅ shipped — bus + send_message + spawn_agent; 68 tests pass + live 2-agent smoke test |
 
 ---
 
@@ -58,15 +58,17 @@ The outer loop then waits for the next message and goes again, forever.
 - **Language:** Python 3.12+ (the build runs on 3.13). Self-contained — claw-zero
   does **not** import `harness.*` (the harness `__init__.py` eagerly pulls the cua
   SDK). Everything kept was **ported** into the package, not imported.
-- **LLM client:** `litellm`. Keep LiteLLM model-string format so Anthropic /
-  OpenAI / Bedrock / Vertex all work. **No** additional SDK.
+- **LLM client:** OpenAI SDK only. Use native OpenAI model ids; the old
+  `openai/<id>` prefix is accepted as a compatibility shim, but other provider
+  prefixes are rejected.
 - **Dropped completely:** `cua-agent`, `cua-computer`, `cua-core`, `Pillow`, all
   computer-use / GUI / screenshot / VM code, the `canonical/` and
   `model/unified_loop.py` SDK-bridge layers, image handling, and `subagent/`
   delegation.
-- **Tools (minimal):** exactly one — `bash` (client-side, local subprocess). It is
-  also the file tool (`cat`/`grep`/`find`/`sed`/`python -c`). No dedicated
-  read/write/edit/grep/glob tools, no web search, no policy/permission gate.
+- **Tools (minimal):** OpenAI local `shell` (client-side subprocess) plus OpenAI's hosted
+  `web_search` Responses tool. `shell` is also the file tool
+  (`cat`/`grep`/`find`/`sed`/`python -c`). No dedicated read/write/edit/grep/glob
+  tools and no policy/permission gate.
 - **Messaging transport:** in-memory bus + per-agent mailboxes; **the human is a
   named participant over stdio**, addressed by name exactly like an agent. This
   in-process message-passing **is** the agent-to-agent (A2A) system — it is the
@@ -75,16 +77,16 @@ The outer loop then waits for the next message and goes again, forever.
 - **Outer loop vs inner loop are separate modules.**
 
 **Ground-truth facts (settled — do not "correct" these):**
-- Default model: `openai/gpt-5.5` (LiteLLM format).
-- Thinking/effort is **always max** wherever it applies. `llm.py` folds in the
-  ported thinking layer and passes `MAX_EFFORT` (`ThinkLevel.XHIGH`) on every call
-  site (main loop, compaction, memory flush). There is **no per-site effort knob**.
+- Default model: `gpt-5.5` (native OpenAI model id).
+- Reasoning effort is fixed in `llm.py` as the Responses API block
+  `reasoning={"effort": "xhigh"}` on every call site (main loop, compaction,
+  memory flush). There is **no per-site effort knob**.
 - Prompt caching is a **prefix match**: the system prompt prefix is byte-stable;
   volatile content sits below `CACHE_BOUNDARY` (`<!-- CLAW_ZERO_CACHE_BOUNDARY -->`).
-  `llm.apply_cache_markers` handles the markers.
+  `llm.py` consumes the marker before sending the prompt to OpenAI.
 
 **Out of scope for this milestone (TODO markers only — not built):**
-computer use, GUI, images, web search, subagent delegation, A2A network transport,
+computer use, GUI, images, subagent delegation, A2A network transport,
 teams, cron, policy/permission gate, the `DONE` signal.
 
 ---
@@ -100,7 +102,7 @@ claw-zero/                    # repo root == the package
   __init__.py                 # version + package docstring (lazy submodule imports)
   __main__.py                 # entry point (Phase 9)
   config.py                   # ClawZeroConfig (Phase 9)
-  llm.py                      # single litellm call + thinking + model resolve + cache (Phase 2)
+  llm.py                      # single OpenAI Responses call + context fallback (Phase 2)
   prompt.py                   # gated "absence is the signal" builder (Phase 4)
   AGENTS.md                   # persistent operating doc (Phase 4)
   outer_loop.py               # self-owned loop + Agent (Phase 8)
@@ -110,7 +112,7 @@ claw-zero/                    # repo root == the package
     peer.py                   # Peer + StdioPeer + tick_source (Phase 1)
   tools/
     registry.py               # build_tools / get_tool_summaries (Phase 3)
-    bash.py                   # the single tool (Phase 3)
+    bash.py                   # local Shell executor (Phase 3)
   context/
     compaction.py             # chat-shape compaction (Phase 6)
     token_estimation.py       # chars/4 estimator, no image path (Phase 6)
@@ -119,7 +121,7 @@ claw-zero/                    # repo root == the package
     store.py                  # MemoryStore (Phase 5)
     flush.py                  # flush-before-compaction (Phase 5)
     session-001.md            # the build's own dog-food log
-  tests/                      # 50 tests (still import the `claw_zero` package name)
+  tests/                      # 68 tests (still import the `claw_zero` package name)
   README.md                   # quickstart + architecture (the canonical README)
   docs/                       # this analysis set (TODO, PORTING, summaries, comparison)
 ```
@@ -146,17 +148,20 @@ the live smoke test recorded in `memory/session-001.md`). Paths below are the
   the only allowed branch is `kind` (`tick` vs `message`).
 
 ### Phase 2 — LLM core
-- [x] **2.1 `llm.py`** — one `call()` via `litellm.acompletion` returning a
-  normalized `LLMResult` (`text`, `tool_calls`, `finish_reason`, `usage`). Folds in
-  thinking/effort (always `MAX_EFFORT`), model resolution, and the cache policy.
+- [x] **2.1 `llm.py`** — one `call()` via
+  `AsyncOpenAI().responses.create` returning a normalized `LLMResult`
+  (`text`, `tool_calls`, `finish_reason`, `usage`). Folds in the fixed OpenAI
+  reasoning setting, OpenAI-only model-id/context-window handling, and
+  prompt-boundary stripping.
 
-### Phase 3 — Tools (exactly one)
-- [x] **3.1 `tools/bash.py`** — client-side `bash(command, timeout?)`; local
+### Phase 3 — Tools
+- [x] **3.1 `tools/bash.py`** — client-side executor for OpenAI local Shell; local
   `asyncio` subprocess in a persistent cwd, middle-truncated output, process-group
   kill on timeout (`start_new_session=True` + `os.killpg`), Claude-Code-rich
-  description (bash *is* the file tool).
+  description (shell *is* the file tool).
 - [x] **3.2 `tools/registry.py`** — `build_tools` / `get_tool_summaries` split;
-  exactly one spec + one handler; summaries consumed by the prompt builder.
+  local function-tool specs get handlers; hosted web search and local Shell are
+  included as OpenAI Responses tool specs.
 
 ### Phase 4 — Prompt builder
 - [x] **4.1 `prompt.py`** — gated sections (Identity, Operating loop, Tools,
@@ -185,7 +190,7 @@ the live smoke test recorded in `memory/session-001.md`). Paths below are the
 
 ### Phase 7 — Inner loop (one activation → one delivered message)
 - [x] **7.1 `inner_loop.py`** — `run(ActivationContext) -> Message`:
-  flush → `llm.call` → dispatch `bash` → compact-if-over-budget → return the
+  flush → `llm.call` → dispatch local Shell/function calls → compact-if-over-budget → return the
   plain-text reply as the delivered `Message`. The return value **replaces `DONE`**.
   A 50-iteration backstop guards against a model that never replies.
 
@@ -203,12 +208,12 @@ the live smoke test recorded in `memory/session-001.md`). Paths below are the
   stdin EOF. API keys from env only.
 
 ### Phase 10 — Verify & document
-- [x] **10.1 Smoke test** — passed live against `openai/gpt-5.5` (bash `ls` + a
-  memory write via bash + a plain-text reply; loop stayed alive for a follow-up).
+- [x] **10.1 Smoke test** — passed live against `gpt-5.5` (shell `ls` + a
+  memory write via shell + a plain-text reply; loop stayed alive for a follow-up).
 - [x] **10.2 README** — `README.md` (now at the repo root) covers the quickstart,
-  the two-loop split, the equal-peers model, the single `bash` tool, and the
+  the two-loop split, the equal-peers model, the local Shell tool, and the
   deferred list.
-- [x] **10.3 Tests** — 50 tests pass (`pytest`). They import the `claw_zero`
+- [x] **10.3 Tests** — 68 tests pass (`pytest`). They import the `claw_zero`
   package name, which resolves again via the restored `pyproject.toml` (§13.1).
 ---
 
@@ -217,7 +222,7 @@ the live smoke test recorded in `memory/session-001.md`). Paths below are the
 - [x] A self-owned loop that never exits on its own; a human peer over stdio can
   converse with it; the human is one peer among (future) many — no
   `sender == "human"` special-casing.
-- [x] Exactly one client-side tool: `bash`.
+- [x] Exactly one client-side command tool: local `shell`.
 - [x] An activation ends by **delivering a message**, never by emitting "DONE".
 - [x] Durable memory (session log + curated) and flush-before-compaction work;
   long runs compact in place without losing tool pairing.
@@ -241,17 +246,17 @@ design; they were packaging/doc fixes, now complete.
   `[tool.setuptools] package-dir = { "claw_zero" = "." }`, with the subpackages
   (`claw_zero.messaging`/`.tools`/`.context`/`.memory`) listed explicitly — `find`
   can't discover them because the on-disk dirs are `messaging`/`tools`/… and the
-  repo dir is `claw-zero` (a hyphen, not a module name). Runtime dep `litellm>=1.80`
+  repo dir is `claw-zero` (a hyphen, not a module name). Runtime dep `openai>=2.43`
   and dev dep `pytest>=8` reinstated; console script `claw-zero = claw_zero.__main__:main`.
   **Acceptance met:** `python -m claw_zero --help`, `import claw_zero`, and
   `claw-zero --help` (console script) all run; `import claw_zero` stays lazy (does
-  not pull in `litellm`).
+  not pull in `openai`).
 - [x] **13.2 Restore a dev environment.** `uv venv .venv && uv pip install -e ".[dev]"`
   (or `pip install -e ".[dev]"`). **Acceptance met:** `pip list | grep -i cua` is
-  empty; `import litellm` succeeds. `.gitignore` now also covers `*.egg-info/`,
+  empty; `import openai` succeeds. `.gitignore` now also covers `*.egg-info/`,
   `build/`, `dist/`, and `claw_zero_state/`.
 - [x] **13.3 Green tests post-reorg.** **Acceptance met:** `pytest` collects and
-  passes all **50** tests (`testpaths = ["tests"]`, `--import-mode=importlib`).
+  passes all **68** tests (`testpaths = ["tests"]`, `--import-mode=importlib`).
 - [x] **13.4 Reconcile the README quickstart.** The root `README.md` `pip install
   -e ".[dev]"` / `python -m claw_zero` quickstart now works as written, and its
   "Layout" block shows the repo-root layout (with `pyproject.toml`, `tests/`,
@@ -279,9 +284,9 @@ Claw's parent→subagent hierarchy, because the flat mesh matches the thesis.
 - **In-process only.** Every agent is a coroutine in one event loop. A2A network
   transport stays deferred — the `MessageBus` is the seam it drops into (routing
   is already by recipient id).
-- **"Absence is the signal" preserved.** A lone agent (no roster, no spawn) is
-  byte-for-byte the original: bash-only tool surface, no `# Team` prompt section.
-  Team tools/prose appear only when the run is team-capable.
+- **"Absence is the signal" preserved.** A lone agent (no roster, no spawn) has
+  only the baseline tools (`shell` plus hosted `web_search`) and no `# Team`
+  prompt section. Team tools/prose appear only when the run is team-capable.
 - **Cache-stable gating.** `has_team` (and team-tool registration) is fixed at
   agent creation from config, never from the live peer count — so the `# Team`
   section stays in the byte-stable cached prefix even as `spawn_agent` grows the
@@ -313,7 +318,7 @@ Claw's parent→subagent hierarchy, because the flat mesh matches the thesis.
 - [x] **14.9 `AGENTS.md`** — "Working with Teammates" coordination ethos.
 - [x] **14.10 Tests** — `test_bus.py`, `test_team_tools.py`, `test_team.py` (2
   multi-agent e2e + single-agent-no-team-tools), plus roster/config + prompt
-  gating tests. **67 pass.** Live 2-agent smoke test against `openai/gpt-5.5`:
+  gating tests. **68 pass.** Live 2-agent smoke test against `gpt-5.5`:
   human→planner→(send_message)→coder→planner→human relay verified.
 
 **Still deferred (unchanged by this milestone):** A2A network transport, a team
@@ -325,6 +330,6 @@ policy/permission gate.
 
 These are intentionally **absent** (TODO markers, not built):
 
-- **web search**, computer use / GUI, images, vision
+- computer use / GUI, images, vision
 - **cross-process / network transport** — the team is in-process and that is the
   intended scope; there are no external/remote agents

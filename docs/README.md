@@ -4,8 +4,8 @@ Analysis of the two codebases that were merged into one minimal, **non-user-faci
 self-owned, long-running** agent loop with agent-to-agent communication — plus the
 implementation brief for the result, **claw-zero**.
 
-> **Status:** claw-zero is **built** — all 11 phases shipped, 50 tests green, and a
-> live smoke test passed against `openai/gpt-5.5` (see the package `README.md` and
+> **Status:** claw-zero is **built** — all 11 phases shipped, 68 tests green, and a
+> live smoke test passed against `gpt-5.5` (see the package `README.md` and
 > `memory/session-001.md`). A later `reorganize folders` commit flattened the
 > package to the repo root and removed the vendored harness; the only open work is
 > the packaging/import fixes tracked in [`claw-zero-TODO.md`](./claw-zero-TODO.md) §13.

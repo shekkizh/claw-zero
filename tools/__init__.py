@@ -1,9 +1,8 @@
-"""Tools — exactly one: ``bash`` (client-side, local subprocess).
+"""Tools - OpenAI local Shell plus hosted web search.
 
-``bash`` is also the file tool: read with ``cat``/``sed -n``, search with
+``shell`` is also the file tool: read with ``cat``/``sed -n``, search with
 ``grep -rn``/``rg``, find with ``find``, edit with ``sed``/``python -c``. There
-are no dedicated read/write/edit/grep/glob tools, no web search, and no
-permission gate.
+are no dedicated read/write/edit/grep/glob tools and no permission gate.
 """
 
 from .bash import BashTool

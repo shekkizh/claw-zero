@@ -94,7 +94,7 @@ def test_run_flush_routes_memory_write(tmp_path, monkeypatch):
                 llm.ToolCall(id="c1", name="memory_write",
                              arguments='{"content": "remember: build is green", "target": "session"}'),
                 llm.ToolCall(id="c2", name="memory_write",
-                             arguments='{"content": "# Strategy\\nuse bash for files", "target": "curated"}'),
+                             arguments='{"content": "# Strategy\\nuse shell for files", "target": "curated"}'),
             ],
             finish_reason="tool_calls",
         )
@@ -102,13 +102,13 @@ def test_run_flush_routes_memory_write(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "call", fake_call)
 
     ran = asyncio.run(run_memory_flush(
-        model="openai/gpt-5.5", messages=[{"role": "user", "content": "hi"}],
+        model="gpt-5.5", messages=[{"role": "user", "content": "hi"}],
         memory_store=store, state=state,
     ))
     assert ran is True
     # session log gained the observation; curated gained the strategy.
     assert "build is green" in store.read_file(store.list_session_files()[0])
-    assert "use bash for files" in store.read_curated()
+    assert "use shell for files" in store.read_curated()
     # dedup recorded.
     assert state.flushed_at_compaction_count == state.compaction_count
 

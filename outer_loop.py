@@ -79,9 +79,9 @@ class Agent:
         """Wire up an Agent with its memory store, transcript, and tools.
 
         ``agents_md`` (the loaded ``AGENTS.md`` text) is injected as a context
-        file. ``extra_tools`` are appended after ``bash`` — the team tools
+        file. ``extra_tools`` are appended after local Shell — the team tools
         (``send_message``, ``spawn_agent``) come in this way, so a single-agent
-        run that passes none simply has the original one-tool surface. The
+        run that passes none simply has Shell plus hosted web search. The
         session log and transcript session header are initialized here.
         ``context_window`` overrides the model-resolved window when given.
         """
@@ -148,10 +148,7 @@ class Agent:
         )
 
     def _cwd(self) -> str:
-        bash = self.tools.handlers.get("bash")
-        # The handler is BashTool.run (bound method); reach its instance's cwd.
-        instance = getattr(bash, "__self__", None)
-        return getattr(instance, "cwd", "") if instance is not None else ""
+        return getattr(self.tools.shell_tool, "cwd", "") if self.tools.shell_tool is not None else ""
 
 
 def _incoming_text(msg: Message) -> str:

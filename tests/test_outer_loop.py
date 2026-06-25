@@ -30,7 +30,7 @@ class FakePeer:
 def _agent(tmp_path, agent_id="claw-zero") -> Agent:
     return Agent.create(
         agent_id=agent_id,
-        model="openai/gpt-5.5",
+        model="gpt-5.5",
         base_dir=str(tmp_path),
         cwd=str(tmp_path),
         agents_md="# AGENTS.md\nhome doc",

@@ -1,101 +1,225 @@
-"""Phase 2 — unit tests for the pure pieces of llm.py (no network).
+"""Phase 2 - unit tests for llm.py's offline adapter pieces."""
 
-The live-model acceptance (a real openai/gpt-5.5 call) is exercised separately
-in the Phase 2 verification step, not here, so the suite stays offline.
-"""
+import pytest
 
 from claw_zero import llm
-from claw_zero.llm import CACHE_BOUNDARY, MAX_EFFORT, ThinkLevel
+from claw_zero.llm import CACHE_BOUNDARY
 
 
-def test_max_effort_is_xhigh():
-    assert MAX_EFFORT is ThinkLevel.XHIGH
+def test_resolve_context_window_openai_only():
+    assert llm.resolve_context_window("gpt-5.5") == 1_050_000
+    assert llm.resolve_context_window("openai/gpt-5.5") == 1_050_000
+    assert llm.resolve_context_window("future-model") == llm.DEFAULT_CONTEXT_TOKENS
+    with pytest.raises(ValueError, match="OpenAI-only"):
+        llm.resolve_context_window("anthropic/claude-opus-4-8")
 
 
-def test_thinking_params_per_provider_at_max():
-    # OpenAI → reasoning_effort (xhigh collapses to high)
-    assert llm.max_thinking_params("openai/gpt-5.5") == {"reasoning_effort": "high"}
-    # Anthropic → thinking budget
-    p = llm.max_thinking_params("anthropic/claude-opus-4-8")
-    assert p["thinking"]["type"] == "enabled" and p["thinking"]["budget_tokens"] == 25000
-    # OpenRouter → unified reasoning block
-    assert llm.max_thinking_params("openrouter/openai/gpt-5.5") == {"reasoning": {"effort": "high"}}
-    # Gemini → thinking_level
-    assert llm.max_thinking_params("gemini/gemini-2.5-pro") == {"thinking_level": "HIGH"}
-
-
-def test_off_level_is_empty():
-    assert llm.resolve_thinking_params(ThinkLevel.OFF, "openai/gpt-5.5") == {}
-
-
-def test_resolve_model_provider_inference():
-    assert llm.resolve_model("openai/gpt-5.5").provider == "openai"
-    assert llm.resolve_model("anthropic/claude-opus-4-8").provider == "anthropic"
-    assert llm.resolve_model("openrouter/anthropic/claude-opus-4-8").provider == "anthropic"
-    assert llm.resolve_model("gemini/gemini-2.5-pro").provider == "google"
-    # context window is always a positive int (fallback when unknown)
-    assert llm.resolve_model("totally/unknown-model").context_window > 0
-
-
-def test_cache_markers_anthropic_splits_system_at_boundary():
+def test_responses_input_converts_chat_history_without_mutating():
     msgs = [
-        {"role": "system", "content": f"STABLE PREFIX{CACHE_BOUNDARY}volatile date line"},
-        {"role": "user", "content": "hello"},
-    ]
-    llm.apply_cache_markers(msgs, "anthropic/claude-opus-4-8")
-    blocks = msgs[0]["content"]
-    assert isinstance(blocks, list)
-    assert blocks[0]["text"] == "STABLE PREFIX"
-    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
-    assert blocks[1]["text"] == "volatile date line"
-    assert "cache_control" not in blocks[1]
-    # Trailing message gets the sliding breakpoint.
-    assert msgs[-1]["cache_control"] == {"type": "ephemeral"}
-
-
-def test_cache_markers_non_anthropic_consumes_boundary_no_markers():
-    msgs = [
-        {"role": "system", "content": f"STABLE{CACHE_BOUNDARY}volatile"},
+        {
+            "role": "assistant",
+            "content": "old",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "send_message", "arguments": '{"to": "coder", "content": "go"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}'},
         {"role": "user", "content": "hi"},
     ]
-    llm.apply_cache_markers(msgs, "openai/gpt-5.5")
-    # Boundary marker text removed; no cache_control anywhere.
-    assert CACHE_BOUNDARY not in msgs[0]["content"]
-    assert "STABLE" in msgs[0]["content"] and "volatile" in msgs[0]["content"]
-    assert all("cache_control" not in m for m in msgs)
+    items = llm._responses_input(msgs)
+    assert items == [
+        {"role": "assistant", "content": "old"},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "send_message",
+            "arguments": '{"to": "coder", "content": "go"}',
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": '{"ok": true}'},
+        {"role": "user", "content": "hi"},
+    ]
+    assert len(msgs) == 3
 
 
-def test_normalize_extracts_text_tool_calls_usage():
-    # Build a duck-typed litellm-style response object.
-    class _Fn:
-        name = "bash"
-        arguments = '{"command": "echo hi"}'
+def test_responses_input_replays_stored_response_items():
+    response_items = [
+        {"type": "reasoning", "id": "rs_1", "summary": []},
+        {
+            "type": "shell_call",
+            "call_id": "call_1",
+            "action": {"commands": ["pwd"], "timeout_ms": 120000, "max_output_length": 4096},
+        },
+    ]
+    msgs = [
+        {"role": "assistant", "content": "", "response_items": response_items},
+        {
+            "type": "shell_call_output",
+            "call_id": "call_1",
+            "max_output_length": 4096,
+            "output": [{"stdout": "/tmp\n", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}],
+        },
+    ]
+    assert llm._responses_input(msgs) == [
+        *response_items,
+        {
+            "type": "shell_call_output",
+            "call_id": "call_1",
+            "max_output_length": 4096,
+            "output": [{"stdout": "/tmp\n", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}],
+        },
+    ]
 
-    class _TC:
-        id = "call_1"
-        function = _Fn()
+
+def test_build_openai_kwargs_maps_parameters():
+    tool = {
+        "type": "shell",
+        "environment": {"type": "local"},
+    }
+    kwargs = llm._build_openai_kwargs(
+        model="openai/gpt-5.5",
+        messages=[{"role": "user", "content": "hi"}],
+        system=f"SYS{CACHE_BOUNDARY}DYNAMIC",
+        tools=[tool],
+        max_tokens=123,
+        temperature=1.0,
+        timeout=30,
+    )
+    assert kwargs == {
+        "model": "gpt-5.5",
+        "input": [{"role": "user", "content": "hi"}],
+        "instructions": "SYS\n\nDYNAMIC",
+        "max_output_tokens": 123,
+        "temperature": 1.0,
+        "reasoning": {"effort": "xhigh"},
+        "tools": [tool],
+        "timeout": 30,
+    }
+
+
+def test_normalize_extracts_text_tool_calls_usage_and_items():
+    class _Text:
+        type = "output_text"
+        text = "running it"
+        annotations = []
 
     class _Msg:
-        content = "running it"
-        tool_calls = [_TC()]
+        type = "message"
+        content = [_Text()]
 
-    class _Choice:
-        message = _Msg()
-        finish_reason = "tool_calls"
+    class _Call:
+        type = "function_call"
+        call_id = "call_1"
+        name = "send_message"
+        arguments = '{"to": "coder", "content": "go"}'
+
+    class _Action:
+        commands = ["echo hi"]
+        timeout_ms = 120000
+        max_output_length = 4096
+
+    class _Shell:
+        type = "shell_call"
+        call_id = "sh_1"
+        action = _Action()
+        status = "in_progress"
 
     class _Usage:
-        prompt_tokens = 100
-        completion_tokens = 20
+        input_tokens = 100
+        output_tokens = 20
         total_tokens = 120
 
     class _Resp:
-        choices = [_Choice()]
+        output = [_Msg(), _Call(), _Shell()]
         usage = _Usage()
+        status = "completed"
+        incomplete_details = None
 
     result = llm._normalize(_Resp())
     assert result.text == "running it"
     assert result.has_tool_calls
-    assert result.tool_calls[0].name == "bash"
-    assert result.tool_calls[0].arguments == '{"command": "echo hi"}'
+    assert result.tool_calls[0].name == "send_message"
+    assert result.tool_calls[0].arguments == '{"to": "coder", "content": "go"}'
+    assert result.shell_calls[0] == llm.ShellCall(
+        id="sh_1",
+        commands=["echo hi"],
+        timeout_ms=120000,
+        max_output_length=4096,
+    )
     assert result.finish_reason == "tool_calls"
     assert result.usage == {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+    assert result.response_items == [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "running it", "annotations": []}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "send_message",
+            "arguments": '{"to": "coder", "content": "go"}',
+        },
+        {
+            "type": "shell_call",
+            "call_id": "sh_1",
+            "action": {"commands": ["echo hi"], "timeout_ms": 120000, "max_output_length": 4096},
+            "status": "in_progress",
+        },
+    ]
+
+
+def test_normalize_appends_web_citation_sources():
+    class _Citation:
+        type = "url_citation"
+        title = "Example"
+        url = "https://example.com/report"
+        start_index = 0
+        end_index = 7
+
+    class _Text:
+        type = "output_text"
+        text = "Current result."
+        annotations = [_Citation()]
+
+    class _Msg:
+        type = "message"
+        content = [_Text()]
+
+    class _Search:
+        type = "web_search_call"
+
+        def model_dump(self, exclude_none=True):
+            return {"type": "web_search_call", "id": "ws_1", "status": "completed"}
+
+    class _Resp:
+        output = [_Search(), _Msg()]
+        usage = None
+        status = "completed"
+        incomplete_details = None
+
+    result = llm._normalize(_Resp())
+    assert result.text == "Current result.\n\nSources:\n- Example: https://example.com/report"
+    assert result.response_items[0] == {"type": "web_search_call", "id": "ws_1", "status": "completed"}
+
+
+def test_dump_item_preserves_web_search_call_action_without_model_dump():
+    class _Action:
+        type = "search"
+        query = "latest AI news"
+
+    class _Search:
+        type = "web_search_call"
+        id = "ws_1"
+        status = "completed"
+        action = _Action()
+
+    assert llm._dump_item(_Search()) == {
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "latest AI news"},
+    }

@@ -1,293 +1,20 @@
-"""llm.py — claw-zero's single LLM entry point, driven through litellm.
-
-This folds together the reusable, cua-free pieces of the ALE Claw harness model
-layer into one self-contained module:
-
-  - **thinking/effort** (ported from ``harness/model/thinking.py``): map a
-    ``ThinkLevel`` to provider-specific reasoning kwargs. claw-zero always calls
-    at **max effort** — there is no per-site effort knob. Every call site (main
-    loop, compaction, memory flush) passes ``MAX_EFFORT``.
-  - **model resolution** (trimmed from ``harness/model/model_config.py``):
-    provider inference + context-window lookup. The computer-use format fields
-    (tool schema type, screenshot type, action format, adapter target) are
-    dropped — claw-zero has no GUI.
-  - **cache policy** (ported from ``harness/model/cache_policy.py``): sliding
-    ``cache_control`` breakpoints for Anthropic-family models, splitting the
-    system prompt at a byte-stable boundary so volatile content sits below the
-    cached prefix.
-  - **the call** (ported from ``harness/model/helper_runtime.py``): one
-    ``litellm.acompletion`` round-trip returning a normalized result.
-
-``call()`` is the only function the rest of claw-zero uses to reach a model.
-It keeps LiteLLM's model-string format, so Anthropic / OpenAI / Bedrock / Vertex
-all work without any additional SDK. API keys are read from the environment by
-litellm — never from config.
-"""
+"""llm.py - claw-zero's OpenAI Responses API adapter."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
 
-# ===========================================================================
-# Thinking / effort  (ported from harness/model/thinking.py)
-# ===========================================================================
-
-class ThinkLevel(str, Enum):
-    """Reasoning depth. claw-zero only ever uses ``XHIGH`` (see ``MAX_EFFORT``)."""
-
-    OFF = "off"
-    MINIMAL = "minimal"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    XHIGH = "xhigh"
-    ADAPTIVE = "adaptive"
-
-
-MAX_EFFORT: ThinkLevel = ThinkLevel.XHIGH
-"""The single effort level claw-zero passes everywhere. Thinking is always max."""
-
-
-# Anthropic thinking-budget mapping (harness extra-params.ts Anthropic section).
-_ANTHROPIC_BUDGETS: dict[ThinkLevel, int] = {
-    ThinkLevel.MINIMAL: 2000,
-    ThinkLevel.LOW: 5000,
-    ThinkLevel.MEDIUM: 10000,
-    ThinkLevel.HIGH: 16000,
-    ThinkLevel.XHIGH: 25000,
-    ThinkLevel.ADAPTIVE: 10000,
-}
-
-# OpenAI only supports low/medium/high — collapse our levels.
-_OPENAI_EFFORT: dict[ThinkLevel, str] = {
-    ThinkLevel.MINIMAL: "low",
-    ThinkLevel.LOW: "low",
-    ThinkLevel.MEDIUM: "medium",
-    ThinkLevel.HIGH: "high",
-    ThinkLevel.XHIGH: "high",
-    ThinkLevel.ADAPTIVE: "medium",
-}
-
-_GEMINI_LEVELS: dict[ThinkLevel, str] = {
-    ThinkLevel.MINIMAL: "MINIMAL",
-    ThinkLevel.LOW: "LOW",
-    ThinkLevel.MEDIUM: "MEDIUM",
-    ThinkLevel.HIGH: "HIGH",
-    ThinkLevel.XHIGH: "HIGH",
-    ThinkLevel.ADAPTIVE: "MEDIUM",
-}
-
-
-def resolve_thinking_params(level: ThinkLevel, model: str) -> dict[str, Any]:
-    """Map a ``ThinkLevel`` to provider-specific reasoning kwargs for ``acompletion``.
-
-    Uses the chat-transport mapping (claw-zero drives everything through
-    ``litellm.acompletion``): OpenAI gets ``reasoning_effort``, Anthropic gets a
-    ``thinking`` budget, Gemini gets ``thinking_level``, OpenRouter gets a unified
-    ``reasoning`` block. Returns ``{}`` for ``OFF`` (never used here).
-    """
-    if level == ThinkLevel.OFF:
-        return {}
-
-    m = model.lower()
-    if m.startswith("openrouter/"):
-        return {"reasoning": {"effort": _OPENAI_EFFORT.get(level, "medium")}}
-    if "anthropic/" in m or "claude" in m:
-        return {"thinking": {"type": "enabled", "budget_tokens": _ANTHROPIC_BUDGETS.get(level, 10000)}}
-    if _is_openai_model(m):
-        return {"reasoning_effort": _OPENAI_EFFORT.get(level, "medium")}
-    if "gemini" in m or "google" in m or "vertex" in m:
-        return {"thinking_level": _GEMINI_LEVELS.get(level, "MEDIUM")}
-    return {"reasoning_effort": level.value}
-
-
-def max_thinking_params(model: str) -> dict[str, Any]:
-    """Reasoning kwargs at max effort for ``model``. The canonical claw-zero call."""
-    return resolve_thinking_params(MAX_EFFORT, model)
-
-
-def _is_openai_model(model: str) -> bool:
-    m = model.lower()
-    return "openai" in m or "gpt" in m or m.startswith(("o1", "o3", "o4"))
-
-
-# ===========================================================================
-# Model resolution  (trimmed from harness/model/model_config.py)
-# ===========================================================================
+REASONING: dict[str, str] = {"effort": "xhigh"}
+"""The fixed reasoning setting for every model call."""
 
 DEFAULT_CONTEXT_TOKENS = 200_000
-"""Fallback context window when litellm can't resolve the model."""
-
-
-@dataclass(frozen=True)
-class ResolvedModel:
-    """Capability-light resolved metadata for a litellm model string."""
-
-    model: str
-    model_id: str
-    provider: str
-    context_window: int
-
-
-def _infer_provider(model: str) -> str:
-    m = model.lower()
-    if m.startswith("openrouter/"):
-        # provider is the segment after openrouter/
-        rest = m.split("/", 1)[1]
-        if rest.startswith("anthropic") or "claude" in rest:
-            return "anthropic"
-        if "openai" in rest or "gpt" in rest:
-            return "openai"
-        if "gemini" in rest or "google" in rest:
-            return "google"
-        return "openrouter"
-    if m.startswith("anthropic/") or "claude" in m:
-        return "anthropic"
-    if _is_openai_model(m):
-        return "openai"
-    if "gemini" in m or "google" in m:
-        return "google"
-    if "vertex" in m:
-        return "vertex"
-    return "unknown"
-
-
-def _lookup_context_window(model: str) -> int | None:
-    """Best-effort context-window lookup via litellm's model registry."""
-    candidates = [model]
-    if "/" in model:
-        candidates.append(model.split("/", 1)[1])
-    for candidate in candidates:
-        try:
-            import litellm
-
-            info = litellm.get_model_info(candidate)
-            max_input = info.get("max_input_tokens")
-            if max_input and max_input > 0:
-                return int(max_input)
-        except Exception:
-            continue
-    return None
-
-
-def resolve_model(model: str | ResolvedModel) -> ResolvedModel:
-    """Resolve a litellm model string into ``ResolvedModel`` metadata."""
-    if isinstance(model, ResolvedModel):
-        return model
-    return ResolvedModel(
-        model=model,
-        model_id=model.split("/", 1)[-1] if "/" in model else model,
-        provider=_infer_provider(model),
-        context_window=_lookup_context_window(model) or DEFAULT_CONTEXT_TOKENS,
-    )
-
-
-def resolve_context_window(model: str) -> int:
-    """Context window in tokens for ``model`` (fallback ``DEFAULT_CONTEXT_TOKENS``)."""
-    return resolve_model(model).context_window
-
-
-# ===========================================================================
-# Cache policy  (ported from harness/model/cache_policy.py)
-# ===========================================================================
+KNOWN_CONTEXT_WINDOWS: dict[str, int] = {"gpt-5.5": 1_050_000}
 
 CACHE_BOUNDARY = "<!-- CLAW_ZERO_CACHE_BOUNDARY -->"
-"""Marker the prompt builder inserts between the byte-stable prefix and the
-volatile suffix. Content above is cached; content below is not. (Anthropic only.)
-"""
+"""Marker between the byte-stable prompt prefix and volatile runtime suffix."""
 
-_EPHEMERAL: dict[str, str] = {"type": "ephemeral"}
-
-
-def supports_anthropic_cache(model: str | None) -> bool:
-    """True iff Anthropic ``cache_control`` markers are honored for ``model``."""
-    if not model:
-        return False
-    m = model.lower()
-    return (
-        m.startswith("anthropic/")
-        or m.startswith("openrouter/anthropic/")
-        or m.startswith("vertex_ai/claude")
-        or m.startswith("vertex_ai/anthropic")
-        or m.startswith("bedrock/anthropic")
-        or m.startswith("claude-")
-    )
-
-
-def apply_cache_markers(messages: list[dict[str, Any]] | None, model: str | None) -> None:
-    """Apply the sliding-breakpoint ``cache_control`` pattern in place.
-
-    1. Strip any pre-existing message-level markers (clean slate).
-    2. If ``model`` isn't Anthropic-family, also strip block-level markers and
-       return (no caching available; the marker is consumed by the system split
-       regardless so the boundary text never reaches the model).
-    3. Otherwise mark the system prompt (splitting at ``CACHE_BOUNDARY`` when
-       present) and the trailing message — a sliding breakpoint so the cached
-       prefix grows turn by turn.
-    """
-    if not messages:
-        return
-
-    for msg in messages:
-        msg.pop("cache_control", None)
-
-    anthropic = supports_anthropic_cache(model or "")
-    if not anthropic:
-        # Still consume the boundary marker from the system text so it is never
-        # sent to a non-Anthropic model, but apply no cache_control.
-        _consume_boundary_only(messages[0])
-        for msg in messages:
-            _strip_block_cache_control(msg)
-        return
-
-    _apply_system_cache(messages[0])
-    last = messages[-1]
-    if last is not messages[0]:
-        last["cache_control"] = dict(_EPHEMERAL)
-
-
-def _consume_boundary_only(msg: dict[str, Any]) -> None:
-    content = msg.get("content")
-    if isinstance(content, str) and CACHE_BOUNDARY in content:
-        stable, dynamic = content.split(CACHE_BOUNDARY, 1)
-        msg["content"] = (stable.rstrip() + "\n\n" + dynamic.lstrip()).strip()
-
-
-def _apply_system_cache(msg: dict[str, Any]) -> None:
-    """Mark the system prompt for caching, splitting at the boundary if present."""
-    content = msg.get("content")
-    if isinstance(content, str):
-        if CACHE_BOUNDARY in content:
-            stable, dynamic = content.split(CACHE_BOUNDARY, 1)
-            blocks: list[dict[str, Any]] = []
-            stable = stable.rstrip()
-            if stable:
-                blocks.append({"type": "text", "text": stable, "cache_control": dict(_EPHEMERAL)})
-            dynamic = dynamic.lstrip()
-            if dynamic:
-                blocks.append({"type": "text", "text": dynamic})
-            msg["content"] = blocks
-        else:
-            msg["cache_control"] = dict(_EPHEMERAL)
-        return
-    # Unknown shape — fall back to a message-level marker.
-    msg["cache_control"] = dict(_EPHEMERAL)
-
-
-def _strip_block_cache_control(msg: dict[str, Any]) -> None:
-    content = msg.get("content")
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict):
-                block.pop("cache_control", None)
-
-
-# ===========================================================================
-# The call  (ported from harness/model/helper_runtime.py)
-# ===========================================================================
 
 @dataclass
 class ToolCall:
@@ -295,21 +22,161 @@ class ToolCall:
 
     id: str
     name: str
-    arguments: str  # raw JSON string as the model emitted it
+    arguments: str
+
+
+@dataclass
+class ShellCall:
+    """One native local Shell call from the model."""
+
+    id: str
+    commands: list[str]
+    timeout_ms: int | None = None
+    max_output_length: int | None = None
 
 
 @dataclass
 class LLMResult:
-    """Normalized result of a single model call."""
+    """Normalized result of a single Responses API call."""
 
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
+    shell_calls: list[ShellCall] = field(default_factory=list)
     finish_reason: str = ""
     usage: dict[str, int] = field(default_factory=dict)
+    response_items: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def has_tool_calls(self) -> bool:
-        return bool(self.tool_calls)
+        return bool(self.tool_calls or self.shell_calls)
+
+
+def _model_id(model: str) -> str:
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("model must be a non-empty OpenAI model id")
+    model = model.strip()
+    if model.lower().startswith("openai/"):
+        model = model.split("/", 1)[1]
+    if "/" in model:
+        raise ValueError(f"claw-zero is OpenAI-only; got {model!r}")
+    return model
+
+
+def resolve_context_window(model: str) -> int:
+    return KNOWN_CONTEXT_WINDOWS.get(_model_id(model), DEFAULT_CONTEXT_TOKENS)
+
+
+def _strip_boundary(text: str) -> str:
+    if CACHE_BOUNDARY not in text:
+        return text
+    stable, dynamic = text.split(CACHE_BOUNDARY, 1)
+    return (stable.rstrip() + "\n\n" + dynamic.lstrip()).strip()
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return _strip_boundary(content).strip()
+    if isinstance(content, list):
+        return "\n".join(
+            _strip_boundary(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ).strip()
+    return "" if content is None else str(content).strip()
+
+
+def _function_call_item(tool_call: dict[str, Any]) -> dict[str, Any]:
+    fn = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+    return {
+        "type": "function_call",
+        "call_id": tool_call.get("id", "") if isinstance(tool_call, dict) else "",
+        "name": fn.get("name", ""),
+        "arguments": fn.get("arguments", "{}"),
+    }
+
+
+def _remember_call_ids(
+    item: dict[str, Any],
+    function_call_ids: set[str],
+    shell_call_ids: set[str],
+) -> None:
+    call_id = item.get("call_id") or item.get("id") or ""
+    if not call_id:
+        return
+    if item.get("type") == "function_call":
+        function_call_ids.add(call_id)
+    elif item.get("type") == "shell_call":
+        shell_call_ids.add(call_id)
+
+
+def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    function_call_ids: set[str] = set()
+    shell_call_ids: set[str] = set()
+    for msg in messages:
+        item_type = msg.get("type")
+        if item_type == "shell_call_output":
+            call_id = msg.get("call_id", "")
+            if call_id and call_id in shell_call_ids:
+                items.append(dict(msg))
+            continue
+
+        role = msg.get("role", "user")
+
+        # If this assistant turn came from Responses, replay those output items
+        # directly so reasoning items stay paired with later tool outputs.
+        if role == "assistant" and isinstance(msg.get("response_items"), list):
+            for item in msg["response_items"]:
+                if isinstance(item, dict):
+                    items.append(item)
+                    _remember_call_ids(item, function_call_ids, shell_call_ids)
+            continue
+
+        if role == "tool":
+            call_id = msg.get("tool_call_id", "")
+            if call_id and call_id in function_call_ids:
+                items.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": _content_text(msg.get("content")),
+                })
+            continue
+
+        content = _content_text(msg.get("content"))
+        if content:
+            items.append({"role": role, "content": content})
+        if role == "assistant":
+            for tc in msg.get("tool_calls", []) or []:
+                item = _function_call_item(tc)
+                items.append(item)
+                _remember_call_ids(item, function_call_ids, shell_call_ids)
+    return items
+
+
+def _build_openai_kwargs(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    system: str | None,
+    tools: list[dict[str, Any]] | None,
+    max_tokens: int,
+    temperature: float,
+    timeout: int | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": _model_id(model),
+        "input": _responses_input(messages),
+        "max_output_tokens": max_tokens,
+        "temperature": temperature,
+        "reasoning": REASONING,
+    }
+    if system is not None:
+        kwargs["instructions"] = _strip_boundary(system)
+    if tools:
+        kwargs["tools"] = tools
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return kwargs
 
 
 async def call(
@@ -321,86 +188,205 @@ async def call(
     max_tokens: int = 8192,
     temperature: float = 1.0,
     timeout: int | None = None,
-    effort: ThinkLevel = MAX_EFFORT,
-    cache: bool = True,
 ) -> LLMResult:
-    """Do one tool-calling model call via ``litellm.acompletion`` and normalize it.
+    """Do one OpenAI Responses API call and normalize it."""
+    from openai import AsyncOpenAI
 
-    Args:
-        model: litellm model string (e.g. ``openai/gpt-5.5``).
-        messages: OpenAI chat-shaped messages. If ``system`` is given it is
-            prepended as ``messages[0]`` (so cache markers land on it).
-        system: Optional system prompt text, prepended as a system message.
-        tools: OpenAI tool specs (``{"type": "function", "function": {...}}``).
-        max_tokens: Output token cap.
-        temperature: Sampling temperature (1.0 — reasoning models require it).
-        timeout: Per-call timeout in seconds, or ``None``.
-        effort: Reasoning effort. Defaults to ``MAX_EFFORT`` and should stay
-            there — claw-zero is always-max.
-        cache: Apply Anthropic cache markers (no-op for other providers).
-
-    Returns:
-        ``LLMResult`` with ``text``, ``tool_calls``, ``finish_reason``, ``usage``.
-    """
-    import litellm
-
-    full_messages: list[dict[str, Any]] = list(messages)
-    if system is not None:
-        full_messages = [{"role": "system", "content": system}, *full_messages]
-
-    if cache:
-        apply_cache_markers(full_messages, model)
-
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": full_messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        # Reasoning models (and provider param quirks) — let litellm drop kwargs
-        # a given provider doesn't accept rather than erroring.
-        "drop_params": True,
-        **resolve_thinking_params(effort, model),
-    }
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    if tools:
-        kwargs["tools"] = tools
-
-    response = await litellm.acompletion(**kwargs)
+    response = await AsyncOpenAI().responses.create(
+        **_build_openai_kwargs(
+            model=model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+        )
+    )
     return _normalize(response)
 
 
-def _normalize(response: Any) -> LLMResult:
-    """Convert a litellm chat-completion response into ``LLMResult``."""
-    choice = response.choices[0]
-    message = choice.message
+def _dump_item(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return dict(item)
+    if hasattr(item, "model_dump"):
+        return item.model_dump(exclude_none=True)
+    item_type = getattr(item, "type", "")
+    if item_type == "message":
+        return {
+            "type": "message",
+            "role": getattr(item, "role", "assistant"),
+            "content": [
+                {
+                    "type": getattr(part, "type", ""),
+                    "text": getattr(part, "text", ""),
+                    "annotations": [_dump_annotation(a) for a in getattr(part, "annotations", None) or []],
+                }
+                for part in getattr(item, "content", None) or []
+            ],
+        }
+    if item_type == "function_call":
+        return {
+            "type": "function_call",
+            "call_id": getattr(item, "call_id", "") or getattr(item, "id", ""),
+            "name": getattr(item, "name", ""),
+            "arguments": getattr(item, "arguments", "") or "{}",
+        }
+    if item_type == "shell_call":
+        action = getattr(item, "action", None)
+        return {
+            "type": "shell_call",
+            "call_id": getattr(item, "call_id", "") or getattr(item, "id", ""),
+            "action": _dump_shell_action(action),
+            "status": getattr(item, "status", ""),
+        }
+    if item_type == "web_search_call":
+        dumped: dict[str, Any] = {
+            "type": "web_search_call",
+            "id": getattr(item, "id", "") or getattr(item, "call_id", ""),
+        }
+        status = getattr(item, "status", "")
+        action = getattr(item, "action", None)
+        if status:
+            dumped["status"] = status
+        if action is not None:
+            dumped["action"] = _dump_web_search_action(action)
+        return dumped
+    return {"type": item_type}
 
+
+def _dump_shell_action(action: Any) -> dict[str, Any]:
+    if isinstance(action, dict):
+        return dict(action)
+    if hasattr(action, "model_dump"):
+        return action.model_dump(exclude_none=True)
+    return {
+        "commands": list(getattr(action, "commands", None) or []),
+        "timeout_ms": getattr(action, "timeout_ms", None),
+        "max_output_length": getattr(action, "max_output_length", None),
+    }
+
+
+def _dump_annotation(annotation: Any) -> dict[str, Any]:
+    if isinstance(annotation, dict):
+        return dict(annotation)
+    if hasattr(annotation, "model_dump"):
+        return annotation.model_dump(exclude_none=True)
+    return {
+        "type": getattr(annotation, "type", ""),
+        "url": getattr(annotation, "url", ""),
+        "title": getattr(annotation, "title", ""),
+        "start_index": getattr(annotation, "start_index", None),
+        "end_index": getattr(annotation, "end_index", None),
+    }
+
+
+def _dump_web_search_action(action: Any) -> dict[str, Any]:
+    if isinstance(action, dict):
+        return dict(action)
+    if hasattr(action, "model_dump"):
+        return action.model_dump(exclude_none=True)
+    dumped: dict[str, Any] = {}
+    for key in ("type", "query", "queries", "url", "pattern"):
+        value = getattr(action, key, None)
+        if value is not None:
+            dumped[key] = value
+    return dumped
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+
+def _url_citations(part: Any) -> list[tuple[str, str]]:
+    citations: list[tuple[str, str]] = []
+    for annotation in _get(part, "annotations", []) or []:
+        if _get(annotation, "type") != "url_citation":
+            continue
+        url = _get(annotation, "url", "")
+        if not url:
+            continue
+        citations.append((_get(annotation, "title", "") or url, url))
+    return citations
+
+
+def _output_text(item: Any) -> str:
+    parts: list[str] = []
+    citations: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for part in getattr(item, "content", None) or []:
+        if _get(part, "type") != "output_text":
+            continue
+        parts.append(_get(part, "text", "") or "")
+        for title, url in _url_citations(part):
+            if url not in seen_urls:
+                seen_urls.add(url)
+                citations.append((title, url))
+
+    text = "\n".join(p for p in parts if p).strip()
+    if citations:
+        sources = "\n".join(f"- {title}: {url}" for title, url in citations)
+        text = f"{text}\n\nSources:\n{sources}" if text else f"Sources:\n{sources}"
+    return text
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return int(value)
+
+
+def _shell_call(item: Any) -> ShellCall:
+    action = _get(item, "action", {}) or {}
+    commands = _get(action, "commands", []) or []
+    if isinstance(commands, str):
+        commands = [commands]
+    return ShellCall(
+        id=_get(item, "call_id", None) or _get(item, "id", "") or "",
+        commands=[cmd for cmd in commands if isinstance(cmd, str) and cmd.strip()],
+        timeout_ms=_optional_int(_get(action, "timeout_ms")),
+        max_output_length=_optional_int(_get(action, "max_output_length")),
+    )
+
+
+def _normalize(response: Any) -> LLMResult:
+    text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
-    for tc in (getattr(message, "tool_calls", None) or []):
-        fn = getattr(tc, "function", None)
-        tool_calls.append(
-            ToolCall(
-                id=getattr(tc, "id", "") or "",
-                name=getattr(fn, "name", "") or "",
-                arguments=getattr(fn, "arguments", "") or "{}",
+    shell_calls: list[ShellCall] = []
+
+    output = list(getattr(response, "output", None) or [])
+    for item in output:
+        item_type = getattr(item, "type", None)
+        if item_type == "message":
+            text = _output_text(item)
+            if text:
+                text_parts.append(text)
+        elif item_type == "function_call":
+            tool_calls.append(
+                ToolCall(
+                    id=getattr(item, "call_id", None) or getattr(item, "id", "") or "",
+                    name=getattr(item, "name", "") or "",
+                    arguments=getattr(item, "arguments", "") or "{}",
+                )
             )
-        )
+        elif item_type == "shell_call":
+            shell_calls.append(_shell_call(item))
 
     usage_obj = getattr(response, "usage", None)
-    usage: dict[str, int] = {}
-    if usage_obj is not None:
-        for src, dst in (
-            ("prompt_tokens", "input_tokens"),
-            ("completion_tokens", "output_tokens"),
-            ("total_tokens", "total_tokens"),
-        ):
-            val = getattr(usage_obj, src, None)
-            if isinstance(val, (int, float)) and val > 0:
-                usage[dst] = int(val)
+    usage = {
+        key: int(val)
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+        if isinstance((val := getattr(usage_obj, key, None)), (int, float)) and val > 0
+    } if usage_obj is not None else {}
 
+    status = getattr(response, "status", "") or ""
+    incomplete = getattr(response, "incomplete_details", None)
+    reason = getattr(incomplete, "reason", "") if incomplete is not None else ""
     return LLMResult(
-        text=(getattr(message, "content", None) or "").strip(),
+        text="\n".join(text_parts).strip(),
         tool_calls=tool_calls,
-        finish_reason=getattr(choice, "finish_reason", "") or "",
+        shell_calls=shell_calls,
+        finish_reason="tool_calls" if tool_calls or shell_calls else (reason or status),
         usage=usage,
+        response_items=[_dump_item(item) for item in output],
     )

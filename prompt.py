@@ -7,12 +7,10 @@ non-user-facing peer agent, importing the high-value Claude Code sections
 (behavior/altitude, autonomy) re-pointed from "the user" to "the requesting peer
 / the durable log."
 
-Caching discipline (mirrors ALE Claw + Claude Code): the static prefix is kept
-byte-stable so the prompt cache prefix-matches across turns. Volatile runtime
-context (date, peers, cwd) is injected **after** the ``CACHE_BOUNDARY`` marker
-(consumed by ``llm.apply_cache_markers``), mirroring ALE Claw's
-``# Project Context`` boundary. Never interpolate a timestamp/uuid above the
-boundary.
+Prompt-boundary discipline: the static prefix is kept byte-stable. Volatile
+runtime context (date, peers, cwd) is injected **after** the ``CACHE_BOUNDARY``
+marker, and ``llm.py`` consumes that marker before sending the prompt to OpenAI.
+Never interpolate a timestamp/uuid above the boundary.
 
 Section order (each gated on relevance):
   1. Identity                — always
@@ -127,10 +125,10 @@ def _tools(tool_summaries: dict[str, str]) -> list[str]:
     for name, summary in tool_summaries.items():
         lines.append(f"- **{name}**: {summary}")
     lines.append("")
-    if "bash" in tool_summaries:
+    if "shell" in tool_summaries:
         lines.extend(
             [
-                "`bash` is your only tool, so it is also your file tool: read with "
+                "`shell` is your local command tool, so it is also your file tool: read with "
                 "`cat`/`sed -n`, search with `grep -rn`/`rg`, find with `find`, "
                 "edit with `sed`/`python -c`, write with redirection or `python -c`. "
                 "The working directory persists between calls; shell state (env "
@@ -149,7 +147,7 @@ def _memory(has_memory: bool) -> list[str]:
         "# Memory",
         "",
         "You wake up fresh each activation; your memory files are your "
-        "continuity. You read and write them **via bash** — there is no memory "
+        "continuity. You read and write them **via shell** — there is no memory "
         "tool. Two layers:",
         "",
         "- **Session log** (`memory/session-NNN.md`) — append-only scratchpad. "
@@ -296,10 +294,10 @@ def _runtime_context(runtime: RuntimeContext | None) -> list[str]:
             f"- Participants you can message by name: {', '.join(runtime.peers)}"
         )
     if runtime.curated_path:
-        lines.append(f"- Curated memory file (read/write via bash): {runtime.curated_path}")
+        lines.append(f"- Curated memory file (read/write via shell): {runtime.curated_path}")
     if runtime.memory_dir:
         lines.append(
-            f"- Session log directory (append via bash): {runtime.memory_dir} "
+            f"- Session log directory (append via shell): {runtime.memory_dir} "
             "— the current session log is the highest-numbered session-NNN.md there."
         )
     lines.append("")
@@ -322,7 +320,7 @@ def build_prompt(
 
     Args:
         tool_summaries: ``name -> one-line summary``. Empty/None omits the Tools
-            section entirely (and the bash file-tool note).
+            section entirely (and the shell file-tool note).
         context_files: Bootstrap files injected under Project Context (below the
             cache boundary).
         runtime: Volatile per-activation context (date/peers/cwd), injected below

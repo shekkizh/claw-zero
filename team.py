@@ -9,8 +9,8 @@ participant); that is the path ``__main__`` takes when no extra agents are
 requested, so the original behavior is preserved exactly.
 
 Responsibilities:
-  - Build each agent with the team toolset (``bash`` + ``send_message`` +
-    ``spawn_agent``) bound to the bus and that agent's id.
+  - Build each agent with local Shell plus the team toolset
+    (``send_message`` + ``spawn_agent``) bound to the bus and that agent's id.
   - Register the operator (the human's stdio channel) on the bus.
   - Run one outer-loop task per agent, plus the operator's inbound pump and an
     optional self-tick source.
@@ -65,9 +65,10 @@ class Team:
         self._allow_spawn = allow_spawn
         # Team-capable when there's a roster beyond the primary agent, OR an
         # agent may bring teammates online at runtime. A run that is neither (one
-        # agent, no spawn) is the original single-agent claw-zero: bash only, no
-        # team prose. Computed up front from config so it's stable for the whole
-        # run (it gates the cached static prompt prefix — see has_team).
+        # agent, no spawn) is the original single-agent claw-zero: baseline
+        # shell/web-search tools, no team prose. Computed up front from config so
+        # it's stable for the whole run (it gates the cached static prompt prefix
+        # — see has_team).
         self._team_capable = bool(config.agents) or allow_spawn
         self.bus = MessageBus()
         self._members: dict[str, _Member] = {}
@@ -80,7 +81,7 @@ class Team:
         """The team-aware tools, bound to ``agent_id`` and the shared bus.
 
         Empty for a non-team-capable run (absence is the signal — a lone agent
-        keeps the original bash-only surface). Otherwise ``send_message`` is
+        keeps only the baseline Shell/web-search surface). Otherwise ``send_message`` is
         always present, and ``spawn_agent`` only when runtime spawning is allowed.
         """
         if not self._team_capable:

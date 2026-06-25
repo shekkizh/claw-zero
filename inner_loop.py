@@ -1,7 +1,7 @@
 """Inner loop — one activation → one delivered message.
 
-An activation runs the model in a loop: it may make tool calls (bash is the only
-client-side tool), and it **ends by delivering a message** — the model's
+An activation runs the model in a loop: it may make tool calls (local Shell is
+the client-side command tool), and it **ends by delivering a message** — the model's
 plain-text reply, with no tool call. That delivered ``Message`` is the return
 value; it replaces the harness's ``DONE`` signal entirely. There is no terminal
 state — the outer loop calls this again for the next incoming message.
@@ -10,12 +10,11 @@ Flow (matching the Phase 7 brief):
 
     loop:
         flush_memory_if_triggered()                 # Phase 5 — before compaction
-        result = llm.call(system, messages, tools)  # Phase 2 — effort fixed at max
+        result = llm.call(system, messages, tools)  # Phase 2 - OpenAI Responses
         append assistant turn to messages + transcript
-        if result.tool_calls:                       # bash is the only tool
-            for call in result.tool_calls:
-                out = handlers[call.name](args)
-                append tool result (role="tool", tool_call_id=...)
+        if result.has_tool_calls:
+            execute local shell/function calls
+            append Responses-native outputs
             if over_budget(): compact_in_place()     # Phase 6
             continue
         else:                                        # plain text → deliver
@@ -51,12 +50,12 @@ class ActivationContext:
     conversation persists.
 
     Attributes:
-        model: litellm model string.
+        model: OpenAI model id.
         system_prompt: The assembled system prompt for this activation.
         messages: The running chat-shape conversation (mutated in place).
-        tools: The single-tool registry (specs + handlers).
+        tools: The tool registry (hosted specs plus local handlers).
         memory_store: Durable memory backend (read/written by the flush turn;
-            the agent itself reaches memory via bash).
+            the agent itself reaches memory via shell).
         transcript: Append-only JSONL log.
         flush_state: Pre-compaction flush bookkeeping.
         incoming: The message that triggered this activation.
@@ -87,8 +86,8 @@ class ActivationContext:
 def _assistant_message(result: "llm.LLMResult") -> dict[str, Any]:
     """Reconstruct an OpenAI assistant message from an ``LLMResult``.
 
-    Includes the ``tool_calls`` array (so the following tool messages pair by id)
-    when present. ``content`` may be empty text alongside tool calls.
+    Keeps the normalized ``tool_calls`` array for local pairing/serialization and
+    the raw Responses output items so the next API request can replay them.
     """
     msg: dict[str, Any] = {"role": "assistant", "content": result.text or ""}
     if result.tool_calls:
@@ -96,7 +95,72 @@ def _assistant_message(result: "llm.LLMResult") -> dict[str, Any]:
             {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
             for tc in result.tool_calls
         ]
+    if result.response_items:
+        msg["response_items"] = result.response_items
     return msg
+
+
+def _transcript_tool_calls(result: "llm.LLMResult") -> list[dict[str, Any]]:
+    """Build a transcript-friendly list of function, Shell, and hosted calls."""
+    calls: list[dict[str, Any]] = [
+        {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
+        for tc in result.tool_calls
+    ]
+    for shell_call in result.shell_calls:
+        shell: dict[str, Any] = {"commands": shell_call.commands}
+        if shell_call.timeout_ms is not None:
+            shell["timeout_ms"] = shell_call.timeout_ms
+        if shell_call.max_output_length is not None:
+            shell["max_output_length"] = shell_call.max_output_length
+        calls.append({"id": shell_call.id, "type": "shell", "shell": shell})
+    calls.extend(_transcript_web_search_calls(result.response_items))
+    return calls
+
+
+def _transcript_web_search_calls(response_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for item in response_items:
+        if not isinstance(item, dict) or item.get("type") != "web_search_call":
+            continue
+        call: dict[str, Any] = {"id": item.get("id") or item.get("call_id") or "", "type": "web_search"}
+        if item.get("status"):
+            call["status"] = item["status"]
+        if isinstance(item.get("action"), dict):
+            call["action"] = dict(item["action"])
+        calls.append(call)
+    return calls
+
+
+def _transcript_tool_results(result: "llm.LLMResult") -> list[dict[str, Any]]:
+    """Build transcript metadata for hosted tool results returned in-place."""
+    web_call_ids = [
+        call["id"]
+        for call in _transcript_web_search_calls(result.response_items)
+        if isinstance(call.get("id"), str) and call["id"]
+    ]
+    if not web_call_ids:
+        return []
+
+    results: list[dict[str, Any]] = []
+    for item in result.response_items:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        result_item: dict[str, Any] = {
+            "type": "web_search_result",
+            "toolCallIds": web_call_ids,
+            "content": [part for part in content if isinstance(part, dict)],
+        }
+        if len(web_call_ids) == 1:
+            result_item["toolCallId"] = web_call_ids[0]
+        if item.get("id"):
+            result_item["id"] = item["id"]
+        if item.get("status"):
+            result_item["status"] = item["status"]
+        results.append(result_item)
+    return results
 
 
 def _format_tool_result(result: dict[str, Any], cap: int) -> str:
@@ -132,6 +196,49 @@ async def _dispatch_tool(ctx: ActivationContext, tool_call: "llm.ToolCall") -> d
         "tool_call_id": tool_call.id,
         "content": _format_tool_result(result, ctx.max_tool_result_chars),
     }
+
+
+def _shell_call_output(
+    shell_call: "llm.ShellCall",
+    *,
+    stderr: str,
+    outcome: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "shell_call_output",
+        "call_id": shell_call.id,
+        "output": [
+            {
+                "stdout": "",
+                "stderr": stderr,
+                "outcome": outcome or {"type": "exit", "exit_code": 1},
+            }
+        ],
+    }
+    if shell_call.max_output_length is not None:
+        payload["max_output_length"] = shell_call.max_output_length
+    return payload
+
+
+async def _dispatch_shell(ctx: ActivationContext, shell_call: "llm.ShellCall") -> dict[str, Any]:
+    """Run one native local Shell call, returning ``shell_call_output``."""
+    handler = ctx.tools.shell_handler
+    if handler is None:
+        return _shell_call_output(shell_call, stderr="Error: local shell executor is not configured.")
+
+    try:
+        result = await handler({
+            "call_id": shell_call.id,
+            "commands": shell_call.commands,
+            "timeout_ms": shell_call.timeout_ms,
+            "max_output_length": shell_call.max_output_length,
+        })
+    except Exception as exc:  # noqa: BLE001 — a shell crash must not kill the loop
+        return _shell_call_output(shell_call, stderr=f"Shell executor raised: {exc}")
+
+    if not isinstance(result, dict) or result.get("type") != "shell_call_output":
+        return _shell_call_output(shell_call, stderr="Error: shell executor returned an invalid result.")
+    return result
 
 
 def _current_tokens(ctx: ActivationContext) -> int:
@@ -194,7 +301,7 @@ async def run(ctx: ActivationContext) -> Message:
             compaction_ratio=ctx.compaction_threshold,
         )
 
-        # 2. The model call (effort fixed at max inside llm.call).
+        # 2. The model call (reasoning fixed inside llm.call).
         result = await llm.call(
             ctx.model,
             ctx.messages,
@@ -204,20 +311,32 @@ async def run(ctx: ActivationContext) -> Message:
 
         # 3. Append the assistant turn to messages + transcript.
         assistant_msg = _assistant_message(result)
+        transcript_tool_calls = _transcript_tool_calls(result)
+        transcript_tool_results = _transcript_tool_results(result)
         ctx.messages.append(assistant_msg)
         ctx.transcript.append_message(
             "assistant",
             assistant_msg.get("content") or "",
             usage=result.usage or None,
             stop_reason=result.finish_reason or None,
+            tool_calls=transcript_tool_calls,
+            tool_results=transcript_tool_results,
         )
 
         if result.has_tool_calls:
-            # 4. Execute each tool call; append its result message.
+            # 4. Execute each local Shell/function call; append its result item.
+            for shell_call in result.shell_calls:
+                shell_msg = await _dispatch_shell(ctx, shell_call)
+                ctx.messages.append(shell_msg)
+                ctx.transcript.append_message(
+                    "shell",
+                    json.dumps(shell_msg, ensure_ascii=False, default=str),
+                    tool_call_id=shell_call.id,
+                )
             for tool_call in result.tool_calls:
                 tool_msg = await _dispatch_tool(ctx, tool_call)
                 ctx.messages.append(tool_msg)
-                ctx.transcript.append_message("tool", tool_msg["content"])
+                ctx.transcript.append_message("tool", tool_msg["content"], tool_call_id=tool_call.id)
             # 5. Compact in place if we've crossed the budget.
             if _over_budget(ctx):
                 await _compact_in_place(ctx)

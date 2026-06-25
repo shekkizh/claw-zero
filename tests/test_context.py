@@ -40,7 +40,7 @@ def test_repair_drops_orphan_result():
 def test_repair_inserts_synthetic_for_unmatched_call():
     msgs = [
         {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "call_1", "function": {"name": "bash", "arguments": "{}"}}
+            {"id": "call_1", "function": {"name": "send_message", "arguments": "{}"}}
         ]},
     ]
     rep = repair_tool_use_result_pairing(msgs)
@@ -52,7 +52,7 @@ def test_repair_inserts_synthetic_for_unmatched_call():
 def test_repair_keeps_valid_pair_intact():
     msgs = [
         {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "call_1", "function": {"name": "bash", "arguments": "{}"}}
+            {"id": "call_1", "function": {"name": "send_message", "arguments": "{}"}}
         ]},
         {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
     ]
@@ -84,7 +84,13 @@ def _make_over_budget_history(n_turns: int):
         msgs.append({
             "role": "assistant",
             "content": f"step {i}",
-            "tool_calls": [{"id": cid, "function": {"name": "bash", "arguments": json.dumps({"command": f"echo {i}"})}}],
+            "tool_calls": [{
+                "id": cid,
+                "function": {
+                    "name": "send_message",
+                    "arguments": json.dumps({"to": "operator", "content": f"step {i}"}),
+                },
+            }],
         })
         msgs.append({"role": "tool", "tool_call_id": cid, "content": ("result " + "y" * 800)})
     return msgs
@@ -102,7 +108,7 @@ def test_compact_fits_budget_keeps_summary_and_pairing(monkeypatch):
     before = te.estimate_messages_tokens(history)
 
     result: CompactionResult = asyncio.run(
-        compact_messages(history, "openai/gpt-5.5", context_window=window, recent_turns_preserve=3)
+        compact_messages(history, "gpt-5.5", context_window=window, recent_turns_preserve=3)
     )
 
     assert isinstance(result, CompactionResult)
@@ -126,7 +132,7 @@ def test_compact_fits_budget_keeps_summary_and_pairing(monkeypatch):
 
 
 def test_compact_empty_history():
-    result = asyncio.run(compact_messages([], "openai/gpt-5.5", context_window=10000))
+    result = asyncio.run(compact_messages([], "gpt-5.5", context_window=10000))
     assert result.tokens_before == 0
     assert result.first_kept_message_index == 0
 
@@ -135,7 +141,7 @@ def test_compact_empty_history():
 
 def test_transcript_writes_readable_jsonl(tmp_path):
     t = Transcript(agent_id="claw-zero", base_dir=tmp_path)
-    run = t.init_session(model="openai/gpt-5.5")
+    run = t.init_session(model="gpt-5.5")
     assert run == 1
     mid = t.append_message("user", "hello")
     t.append_message("assistant", "hi", usage={"input_tokens": 10, "output_tokens": 3}, stop_reason="stop")
@@ -149,6 +155,61 @@ def test_transcript_writes_readable_jsonl(tmp_path):
     assert lines[2]["message"]["usage"]["input_tokens"] == 10
     assert lines[3]["summary"] == "a summary"
     assert t.transcript_bytes > 0
+
+
+def test_transcript_records_tool_call_metadata(tmp_path):
+    t = Transcript(agent_id="claw-zero", base_dir=tmp_path)
+    t.init_session(model="gpt-5.5")
+    t.append_message(
+        "assistant",
+        "",
+        stop_reason="tool_calls",
+        tool_calls=[{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "send_message", "arguments": '{"to": "coder"}'},
+        }],
+    )
+    t.append_message("tool", '{"success": true}', tool_call_id="call_1")
+
+    lines = [json.loads(l) for l in t.path.read_text().splitlines() if l.strip()]
+    assistant = lines[1]["message"]
+    tool = lines[2]["message"]
+    assert assistant["stopReason"] == "tool_calls"
+    assert assistant["toolCalls"][0]["function"]["name"] == "send_message"
+    assert tool["toolCallId"] == "call_1"
+
+
+def test_transcript_records_hosted_tool_result_metadata(tmp_path):
+    t = Transcript(agent_id="claw-zero", base_dir=tmp_path)
+    t.init_session(model="gpt-5.5")
+    t.append_message(
+        "assistant",
+        "Current result.",
+        stop_reason="completed",
+        tool_calls=[{
+            "id": "ws_1",
+            "type": "web_search",
+            "status": "completed",
+            "action": {"type": "search", "query": "latest AI news"},
+        }],
+        tool_results=[{
+            "type": "web_search_result",
+            "toolCallId": "ws_1",
+            "content": [{
+                "type": "output_text",
+                "text": "Current result.",
+                "annotations": [{"type": "url_citation", "url": "https://example.com", "title": "Example"}],
+            }],
+        }],
+    )
+
+    lines = [json.loads(l) for l in t.path.read_text().splitlines() if l.strip()]
+    assistant = lines[1]["message"]
+    assert assistant["toolCalls"][0]["type"] == "web_search"
+    assert assistant["toolCalls"][0]["action"]["query"] == "latest AI news"
+    assert assistant["toolResults"][0]["toolCallId"] == "ws_1"
+    assert assistant["toolResults"][0]["content"][0]["annotations"][0]["url"] == "https://example.com"
 
 
 def test_transcript_run_number_increments(tmp_path):

@@ -116,11 +116,11 @@ def test_runtime_spawn_brings_agent_online(tmp_path, monkeypatch):
 
 
 def test_single_agent_run_has_no_team_tools(tmp_path):
-    """A lone agent (no roster, no spawn) keeps the original bash-only surface."""
+    """A lone agent (no roster, no spawn) keeps only the baseline tools."""
     config = _config(tmp_path, agent_id="solo")
     team = Team(config, agents_md="# home", allow_spawn=False)
     agent = team.add_agent("solo")
-    assert set(agent.tools.summaries) == {"bash"}
+    assert set(agent.tools.summaries) == {"shell", "web_search"}
     # And a team-capable run does surface the team tools.
     team2 = Team(_config(tmp_path, agent_id="lead", agents=["helper"]), agents_md="# home")
     lead = team2.add_agent("lead")

@@ -1,4 +1,4 @@
-"""Phase 3 acceptance — bash runs locally, times out, persists cwd; registry split."""
+"""Phase 3 acceptance — local shell runs, times out, persists cwd; registry split."""
 
 import asyncio
 import os
@@ -78,13 +78,32 @@ def test_output_truncation_keeps_head_and_tail():
     assert "truncated" in res["stdout"]
 
 
-def test_registry_single_tool_split():
+def test_shell_call_output_shape():
+    async def run():
+        tool = BashTool()
+        return await tool.run_shell_call({
+            "call_id": "sh_1",
+            "commands": ["echo hi"],
+            "timeout_ms": 120000,
+            "max_output_length": 4096,
+        })
+
+    res = asyncio.run(run())
+    assert res["type"] == "shell_call_output"
+    assert res["call_id"] == "sh_1"
+    assert res["max_output_length"] == 4096
+    assert res["output"][0]["stdout"] == "hi\n"
+    assert res["output"][0]["stderr"] == ""
+    assert res["output"][0]["outcome"] == {"type": "exit", "exit_code": 0}
+
+
+def test_registry_local_shell_split():
     reg = build_tools(BashTool())
-    assert len(reg.specs) == 1
-    assert reg.specs[0]["function"]["name"] == "bash"
-    assert set(reg.handlers) == {"bash"}
+    assert [spec["type"] for spec in reg.specs] == ["web_search", "shell"]
+    assert reg.specs[1]["environment"] == {"type": "local"}
+    assert set(reg.handlers) == set()
+    assert callable(reg.shell_handler)
+    assert reg.shell_tool is not None
     summaries = get_tool_summaries(reg)
-    assert set(summaries) == {"bash"}
-    assert summaries["bash"]  # non-empty one-liner
-    # The full description (model-facing detail) is carried in the spec.
-    assert "stdout" in reg.specs[0]["function"]["description"]
+    assert set(summaries) == {"shell", "web_search"}
+    assert summaries["shell"]  # non-empty one-liner

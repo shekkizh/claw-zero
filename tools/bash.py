@@ -1,4 +1,4 @@
-"""bash — claw-zero's single tool: a client-side, local shell command.
+"""bash - claw-zero's local shell executor.
 
 Adapted from the harness ``ExecTool`` (``harness/tools/tools_shell.py``) by
 re-pointing it from the VM RPC to a **local** ``asyncio`` subprocess running in
@@ -7,10 +7,9 @@ timeout, middle-truncated ``stdout``/``stderr`` (head + tail preserved so exit
 and error lines survive), and a structured ``{exit_code, stdout, stderr, ...}``
 return.
 
-``bash`` is the *only* tool, and it is also the file tool: read with
-``cat``/``sed -n``, search with ``grep -rn``/``rg``, find with ``find``, edit
-with ``sed``/``python -c``, write with redirection or ``python -c``. There are no
-dedicated read/write/edit/grep/glob tools, no web search, and no permission gate.
+This class now backs OpenAI's native local Shell tool. ``run`` preserves the
+legacy function-tool shape for tests and internal callers; ``run_shell_call``
+adapts the same executor to Responses ``shell_call_output`` items.
 
 The working directory **persists** between calls (a ``cd`` in one call is seen by
 the next), but shell state does **not** — each call is a fresh ``/bin/sh``, so
@@ -38,12 +37,11 @@ MAX_TIMEOUT_SECONDS = 600
 DEFAULT_MAX_OUTPUT_CHARS = 16_000
 
 
-BASH_DESCRIPTION = """\
-Executes a single shell command on the local machine and returns its \
-stdout, stderr, and exit_code. The command runs in a fresh `/bin/sh -c`.
+LOCAL_SHELL_DESCRIPTION = """\
+Run shell commands on the local machine through OpenAI's native local Shell tool.
 
-This is your ONLY tool, so it is also how you touch the filesystem — there are \
-no dedicated file tools:
+The shell is also how you touch the filesystem — there are no dedicated file \
+tools:
 - Read a file: `cat path` or `sed -n '1,40p' path` (a line range).
 - Search contents: `grep -rn "pattern" .` (or `rg "pattern"` if ripgrep is present).
 - Find files: `find . -name '*.py'`.
@@ -59,17 +57,17 @@ functions, and aliases from a previous call are gone. Inline what you need in a 
 single command (e.g. `FOO=bar; some_cmd "$FOO"`).
 
 Timeout:
-- `timeout` is in SECONDS (default 120, min 1, max 600). On expiry the command \
-is killed and you get a timeout error instead of hanging. For a command that \
-must run unattended, keep it short and deterministic — do not build tight \
-polling loops.
+- On expiry the command is killed and you get a timeout outcome instead of \
+hanging. For a command that must run unattended, keep it short and deterministic \
+— do not build tight polling loops.
 
 Output:
-- Each of stdout/stderr is middle-truncated past ~16000 chars (head and tail \
-are kept, so the final exit/error lines stay visible). Read large files in \
+- Large visible outputs may be limited by the Shell tool. Read large files in \
 ranges with `sed -n` rather than dumping them whole.
 - When a tool result might be cleared from your context later, write anything \
 you need to remember into your memory files (see Memory)."""
+
+BASH_DESCRIPTION = LOCAL_SHELL_DESCRIPTION
 
 
 def _clamp_timeout(raw: Any, default: int) -> int:
@@ -106,7 +104,7 @@ class BashTool:
         default_timeout: Default per-call timeout in seconds.
     """
 
-    name = "bash"
+    name = "shell"
 
     def __init__(
         self,
@@ -121,7 +119,7 @@ class BashTool:
 
     @property
     def description(self) -> str:
-        return BASH_DESCRIPTION
+        return LOCAL_SHELL_DESCRIPTION
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -150,7 +148,46 @@ class BashTool:
         if not isinstance(command, str) or not command.strip():
             return {"success": False, "error": "Error: 'command' must be a non-empty string."}
         timeout_seconds = _clamp_timeout(params.get("timeout"), self.default_timeout)
+        return await self._run_command(command, timeout_seconds, max_output_chars=self.max_output_chars)
 
+    async def run_shell_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Execute a Responses ``shell_call`` action and return ``shell_call_output``."""
+        call_id = params.get("call_id", "")
+        commands = params.get("commands", [])
+        if isinstance(commands, str):
+            commands = [commands]
+        commands = [cmd for cmd in commands if isinstance(cmd, str) and cmd.strip()]
+        max_output_length = _positive_int(params.get("max_output_length"))
+        timeout_seconds = _timeout_ms_to_seconds(params.get("timeout_ms"), self.default_timeout)
+
+        output: list[dict[str, Any]] = []
+        if not commands:
+            output.append({
+                "stdout": "",
+                "stderr": "Error: shell_call action contained no commands.",
+                "outcome": {"type": "exit", "exit_code": 1},
+            })
+        for command in commands:
+            result = await self._run_command(command, timeout_seconds, max_output_chars=None)
+            output.append(_to_shell_command_output(result))
+
+        payload: dict[str, Any] = {
+            "type": "shell_call_output",
+            "call_id": call_id,
+            "output": output,
+        }
+        if max_output_length is not None:
+            payload["max_output_length"] = max_output_length
+        return payload
+
+    async def _run_command(
+        self,
+        command: str,
+        timeout_seconds: int,
+        *,
+        max_output_chars: int | None,
+    ) -> dict[str, Any]:
+        """Run one command, optionally middle-truncating stdout/stderr."""
         # Capture the post-command working directory via a temp file so a `cd`
         # inside the command persists to the next call without polluting stdout.
         # The capture runs in the SAME shell as the command, after it, guarded so
@@ -183,15 +220,24 @@ class BashTool:
         except asyncio.TimeoutError:
             _kill_process_group(proc)
             try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=5)
+            except (asyncio.TimeoutError, RuntimeError):
+                stdout_b, stderr_b = b"", b""
+            try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
             self._consume_cwd(cwd_path)
+            stdout, out_trunc = _decode_and_maybe_truncate(stdout_b, max_output_chars)
+            stderr, err_trunc = _decode_and_maybe_truncate(stderr_b, max_output_chars)
             return {
                 "success": False,
                 "status": "failed",
                 "timed_out": True,
                 "error": f"Error: command timed out after {timeout_seconds}s and was killed.",
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": out_trunc or err_trunc,
                 "duration_ms": int((time.monotonic() - t0) * 1000),
                 "cwd": self.cwd,
             }
@@ -199,8 +245,8 @@ class BashTool:
         duration_ms = int((time.monotonic() - t0) * 1000)
         self._consume_cwd(cwd_path)
 
-        stdout, out_trunc = _truncate_middle(stdout_b.decode("utf-8", "replace"), self.max_output_chars)
-        stderr, err_trunc = _truncate_middle(stderr_b.decode("utf-8", "replace"), self.max_output_chars)
+        stdout, out_trunc = _decode_and_maybe_truncate(stdout_b, max_output_chars)
+        stderr, err_trunc = _decode_and_maybe_truncate(stderr_b, max_output_chars)
         exit_code = proc.returncode if proc.returncode is not None else -1
 
         return {
@@ -250,3 +296,38 @@ def _kill_process_group(proc: "asyncio.subprocess.Process") -> None:
 def _shquote(path: str) -> str:
     """Single-quote a path for safe interpolation into an /bin/sh command."""
     return "'" + path.replace("'", "'\\''") + "'"
+
+
+def _decode_and_maybe_truncate(data: bytes, cap: int | None) -> tuple[str, bool]:
+    text = data.decode("utf-8", "replace")
+    if cap is None:
+        return text, False
+    return _truncate_middle(text, cap)
+
+
+def _positive_int(raw: Any) -> int | None:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        return None
+    return int(raw)
+
+
+def _timeout_ms_to_seconds(raw: Any, default: int) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        return default
+    return _clamp_timeout(raw / 1000, default)
+
+
+def _to_shell_command_output(result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("timed_out"):
+        outcome = {"type": "timeout"}
+    else:
+        exit_code = result.get("exit_code", 1)
+        outcome = {"type": "exit", "exit_code": int(exit_code) if isinstance(exit_code, int) else 1}
+    stderr = result.get("stderr", "")
+    if result.get("error") and not stderr:
+        stderr = result["error"]
+    return {
+        "stdout": result.get("stdout", ""),
+        "stderr": stderr,
+        "outcome": outcome,
+    }
