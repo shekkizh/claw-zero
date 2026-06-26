@@ -7,12 +7,13 @@ implementation brief for the result, **claw-zero**.
 > **Status:** claw-zero is **built** — all 11 phases shipped, 68 tests green, and a
 > live smoke test passed against `gpt-5.5` (see the package `README.md` and
 > `memory/session-001.md`). A later `reorganize folders` commit flattened the
-> package to the repo root and removed the vendored harness; the only open work is
-> the packaging/import fixes tracked in [`claw-zero-TODO.md`](./claw-zero-TODO.md) §13.
+> package to the repo root and removed the vendored harness; §13 restored
+> packaging/imports. The current open design work is the reloadable
+> self-modifying harness tracked in [`claw-zero-TODO.md`](./claw-zero-TODO.md) §15.
 
 | File | What it is |
 |------|------------|
-| [`claw-zero-TODO.md`](./claw-zero-TODO.md) | **Implementation TODO / status.** The phase-by-phase brief, now annotated with what shipped (all 11 phases) and the post-reorg follow-ups (§13). Start here. |
+| [`claw-zero-TODO.md`](./claw-zero-TODO.md) | **Implementation TODO / status.** The phase-by-phase brief, annotated with what shipped, the post-reorg follow-ups (§13), team milestone (§14), and the new reloadable self-modifying harness TODO (§15). Start here. |
 | [`PORTING.md`](./PORTING.md) | **Per-source KEEP / PORT / DROP map** from the ALE Claw harness into claw-zero. Reflects the post-reorg (repo-root) destination paths. |
 | [`ale-claw-summary.md`](./ale-claw-summary.md) | Summary of **ALE Claw** — the minimal Python computer-use harness that was stripped down. Loop, prompts, tools, context, memory, subagents, model layer, with `file:line` references. The harness is **no longer in this repo**; its source lives at `…/benchmarks/agents-last-exam/ale_run/agents/ale_claw/`. |
 | [`claude-code-summary.md`](./claude-code-summary.md) | Summary of **Claude Code** (`/Users/sshekkizhar/work/anthropic/claude-code/`) — the mature TS agent. Query loop, the section-assembled system prompt, ~40 tools, the **autonomous-work** prompt, and the multi-agent (SendMessage/Team/Cron) primitives. |

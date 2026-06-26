@@ -8,8 +8,9 @@
 > `legacy/` snapshots, `pyproject.toml`, and the per-package `PORTING.md`/`README.md`.
 > That reorg left the package un-runnable as `python -m claw_zero`; **§13
 > Post-reorg follow-ups** restored packaging (a `pyproject.toml` that maps the
-> `claw_zero` package onto the repo root) — `python -m claw_zero` runs and all 50
-> tests pass again. No open work remains.
+> `claw_zero` package onto the repo root). The next open design work is **§15:
+> reloadable self-modifying harness** — making source edits take effect through a
+> process-level reload boundary while preserving durable agent state.
 
 > **Read these first** (design rationale — do not re-derive it):
 > - `docs/ale-claw-summary.md` — the Python harness that was stripped down. The
@@ -38,6 +39,7 @@
 | 10 | Verify & document | ✅ shipped (68 tests green, live smoke test) |
 | 13 | Post-reorg follow-ups | ✅ done — `pyproject.toml` restored; runnable, 68 tests pass |
 | 14 | **Team of agents** (flat peer mesh) | ✅ shipped — bus + send_message + spawn_agent; 68 tests pass + live 2-agent smoke test |
+| 15 | **Reloadable self-modifying harness** | 🟡 TODO — source edits must take effect via process-level restart/reload while preserving state |
 
 ---
 
@@ -72,8 +74,9 @@ The outer loop then waits for the next message and goes again, forever.
 - **Messaging transport:** in-memory bus + per-agent mailboxes; **the human is a
   named participant over stdio**, addressed by name exactly like an agent. This
   in-process message-passing **is** the agent-to-agent (A2A) system — it is the
-  point of the project, not a placeholder. A cross-process / network transport is
-  **not a goal** (no external/remote agents).
+  point of the project, not a placeholder. External/remote A2A network transport
+  is **not a goal**. A local supervisor/worker process boundary for harness
+  reload is a separate lifecycle concern tracked in §15, not a network transport.
 - **Outer loop vs inner loop are separate modules.**
 
 **Ground-truth facts (settled — do not "correct" these):**
@@ -323,7 +326,217 @@ Claw's parent→subagent hierarchy, because the flat mesh matches the thesis.
 
 **Still deferred (unchanged by this milestone):** A2A network transport, a team
 lead / shared task board, cron/scheduling, web search, computer use, a
-policy/permission gate.
+policy/permission gate. Local process supervision for reload is tracked separately
+in §15 and should not be confused with remote A2A transport.
+
+---
+
+## 15. Reloadable self-modifying harness — TODO
+
+### 15.0 Motivation
+
+claw-zero can already inspect and edit its own source files via the local Shell
+tool, but **editing files is not enough**. The live Python process keeps
+already-imported modules, existing class definitions, instantiated `Agent`
+objects, tool handlers, closures, and in-memory message state. A code patch made
+by the agent may be present on disk while the current harness continues to run the
+old code.
+
+That breaks the deeper self-owned-agent goal: claw-zero should be able to improve
+or repair its own harness, verify the change, and then continue running under the
+new code. The solution is not packaging and not a benchmark-specific fork. The
+solution is a **reload/restart boundary**: keep durable agent state outside the
+Python object graph, restart a worker process from the source tree, and resume
+from the same state.
+
+This is a core harness capability. External benchmarks may motivate it later, but
+they must not drive this design. Build the generic reload mechanism first.
+
+### 15.1 Design principles
+
+- **Process boundary, not `importlib.reload()`.** In-process reload is brittle:
+  old objects keep old class/function references, partially reloaded dependency
+  graphs become inconsistent, and existing tool instances may still point at old
+  handlers. A fresh interpreter is the reliable way to pick up changed source.
+- **State is external to code.** Conversation state, memory, transcript, pending
+  work, and runtime metadata must live in the state directory, not only in Python
+  objects.
+- **Source-tree execution.** The restarted worker must import from the current
+  source tree, not from a stale installed wheel. Editable/package metadata may
+  exist for development, but reload correctness should come from launching the
+  worker with explicit `cwd`/`PYTHONPATH`/module path.
+- **Supervisor is boring and stable.** The supervisor should contain as little
+  agent logic as possible: launch worker, preserve args/env/state path, observe a
+  reload exit code, and re-exec the worker.
+- **No remote transport implied.** This is a local lifecycle boundary. It does not
+  change the in-process team/bus model and does not introduce network A2A.
+- **No hot-swap mid-activation for MVP.** Reload should occur at a clean boundary:
+  after the agent has persisted state and requested reload. Do not try to replace
+  live code while tool calls are in flight.
+- **Faithful observability.** Reload requests, test results, state save/load, and
+  restart counts should be recorded in transcript/session logs so a peer can
+  audit what happened.
+
+### 15.2 Target architecture
+
+```text
+stable supervisor process
+  └── claw-zero worker process, launched from source tree
+        ├── loads durable runtime state from --base-dir / --agent-id
+        ├── runs normal activation loop
+        ├── may edit harness source files using shell
+        ├── may run tests/sanity checks
+        ├── calls reload_harness(reason=...)
+        └── exits with RELOAD_REQUESTED status
+
+supervisor sees RELOAD_REQUESTED
+  └── starts a fresh worker with same source tree, cwd, env, model, base-dir,
+      agent id, roster, and pending external-peer configuration
+```
+
+Suggested constant: `RELOAD_REQUESTED_EXIT_CODE = 75` (or another explicit value;
+make it named and tested, not magic).
+
+### 15.3 Durable state that must survive reload
+
+Current claw-zero already persists some state (`AGENT_MEMORY.md`, session logs,
+transcript), but a reloadable worker also needs to persist/restore the runtime
+state that is currently in memory.
+
+Minimum single-agent state:
+
+- [ ] **Conversation messages.** Persist the chat-shaped `agent.messages` list,
+  including assistant `response_items`, function `tool_calls`, tool outputs, and
+  shell outputs exactly enough for the next Responses call to be valid.
+- [ ] **Flush/compaction state.** Persist `FlushState` fields so reload does not
+  reset memory-flush bookkeeping or duplicate pre-compaction flushes.
+- [ ] **Token accounting.** Persist `last_api_input_tokens` and any context-window
+  / auto-compaction settings used to interpret the current state.
+- [ ] **Runtime config.** Persist or reconstruct model, agent id, operator id,
+  cwd, base dir, context window overrides, tick settings, tool-output limits, and
+  team/spawn flags.
+- [ ] **Memory/transcript paths.** Preserve existing file layout and append to the
+  same transcript/session log after reload; do not start a hidden new run unless
+  explicitly logged.
+- [ ] **Reload metadata.** Persist a small `reload_state.json` or equivalent with
+  requested reason, requesting agent id, timestamp, restart count, source tree,
+  argv/env fingerprint, and last completed state-save id.
+
+Team/multi-agent follow-up state:
+
+- [ ] **Roster.** Persist static roster plus spawned teammates and their models.
+- [ ] **Per-agent state.** Persist each agent's messages, flush state, token
+  accounting, context files, and memory path separately.
+- [ ] **Pending inboxes.** Decide whether reload waits for the mesh to become idle
+  before exiting (preferred MVP) or serializes pending bus messages. If serializing,
+  include sender, recipient, kind, content, and ordering.
+- [ ] **External peers.** Preserve operator id / stdio addressing configuration;
+  do not duplicate peer bridges across restarts.
+
+### 15.4 New components / changes to implement
+
+- [ ] **15.4.1 Runtime state serializer.** Add a small, explicit serializer for
+  `Agent` runtime state. Keep it boring JSON under the agent state dir. Avoid
+  pickles; source changes must not break state loading just because a class moved.
+- [ ] **15.4.2 Runtime state loader.** Add `Agent.load(...)` or a companion
+  function that reconstructs an `Agent` from durable state plus current source
+  code. Fresh tool instances should be built from the new code on every worker
+  start.
+- [ ] **15.4.3 Save-at-boundaries.** Save runtime state after each activation and
+  immediately before reload. This makes reload and crashes use the same recovery
+  path.
+- [ ] **15.4.4 Supervisor entrypoint.** Add a stable supervisor mode/entrypoint
+  that starts a worker subprocess with explicit args/env/cwd and handles normal
+  exit vs reload-request exit vs failure.
+- [ ] **15.4.5 Worker entrypoint.** Split the current CLI enough that the worker
+  can run under supervision while preserving existing `python -m claw_zero`
+  behavior. The worker owns the actual agent/team loop.
+- [ ] **15.4.6 `reload_harness` tool.** Register this tool only when running under
+  a reload-capable supervisor. Parameters should include at least `reason` and
+  optionally `tests_run` / `summary`. The tool should:
+  1. append an auditable transcript/session-log entry,
+  2. save all runtime state,
+  3. write reload metadata,
+  4. request clean worker shutdown with the reload exit code.
+- [ ] **15.4.7 Clean shutdown path.** Avoid `os._exit` except as a last-resort
+  fallback. Prefer raising/propagating a typed reload signal to the top-level
+  worker so `finally` blocks, transcript flushes, and subprocess cleanup can run.
+- [ ] **15.4.8 Restart loop guard.** Supervisor should cap repeated reloads or
+  failures (for example max N reloads per M minutes) and report faithfully rather
+  than spinning forever on broken code.
+- [ ] **15.4.9 Source identity logging.** On worker start, log source root, git
+  commit if available, dirty status summary, argv, model, and state dir. After
+  reload, record that the new worker picked up code from disk.
+- [ ] **15.4.10 Backward compatibility.** Existing single-process CLI should keep
+  working. If no supervisor is present, `reload_harness` should be absent or
+  return a clear unsupported error; absence is preferred.
+
+### 15.5 Prompt/tool contract updates
+
+- [ ] **Prompt: explain reload capability only when available.** Add a gated
+  prompt section saying the agent may edit harness code, run checks, and call
+  `reload_harness` to pick up changes. Do not show this section when unsupported.
+- [ ] **Prompt: require verification disclosure.** The agent must report whether
+  it ran tests before requesting reload and must not imply tests passed if they
+  were not run.
+- [ ] **Tool description: clear semantics.** `reload_harness` does not complete
+  the current peer task by itself. It requests a restart; after reload, the agent
+  should continue or report back using restored state.
+- [ ] **Tool description: clean-boundary warning.** The tool should be used after
+  source edits and verification, not casually inside ordinary task solving.
+
+### 15.6 Testing plan
+
+Unit tests:
+
+- [ ] Serialize/load a single `Agent` with user messages, assistant tool calls,
+  tool outputs, shell outputs, `FlushState`, and `last_api_input_tokens`; loaded
+  state should produce equivalent next API input shape.
+- [ ] Serializer uses JSON-compatible primitives only; no pickle/class-object
+  dependency.
+- [ ] `reload_harness` is absent when not supervised, or returns a deterministic
+  unsupported result if intentionally registered.
+- [ ] `reload_harness` writes reload metadata and causes the worker to choose the
+  reload exit code through a typed signal.
+- [ ] Supervisor restarts on reload exit code and does not restart on normal exit.
+- [ ] Supervisor enforces restart-loop guard.
+
+Integration tests / smoke tests:
+
+- [ ] **Marker reload smoke.** Add a tiny harness-visible marker/version function.
+  Run supervised claw-zero, edit the marker source, call `reload_harness`, and
+  verify the restarted worker reports the new marker value while retaining
+  conversation state.
+- [ ] **Tool reload smoke.** Change a toy tool's behavior on disk, reload, and
+  verify the new tool handler is used (proves fresh tool instances come from new
+  code).
+- [ ] **State continuity smoke.** Before reload, store a fact in conversation and
+  session memory; after reload, ask for it and verify it is still available.
+- [ ] **Team later.** Once single-agent reload works, repeat with two agents and a
+  pending/idle mesh decision. Do not block the single-agent MVP on team reload.
+
+### 15.7 Acceptance criteria for the MVP
+
+- [ ] A supervised run can edit source code, request reload, and resume from the
+  same state directory under a fresh interpreter.
+- [ ] The post-reload worker demonstrably uses changed source code, not old module
+  objects.
+- [ ] Conversation history, transcript append path, session memory, flush state,
+  and token accounting survive the restart.
+- [ ] Existing unsupervised `python -m claw_zero` behavior still works.
+- [ ] Existing tests pass, plus new reload serializer/supervisor tests pass.
+- [ ] Reload attempts are auditable in transcript/session logs.
+- [ ] A broken reload does not spin forever; failure is reported with the relevant
+  exit code/output.
+
+### 15.8 Later extensions, not MVP
+
+- Team-wide reload with pending inbox serialization.
+- Live upgrade while preserving long-running background ticks.
+- Versioned state migrations for larger schema changes.
+- Remote/network A2A transport.
+- Benchmark-specific recovery policies. Keep those outside the core reload design
+  until the generic mechanism is working.
 
 ---
 ## Deferred by design
@@ -331,5 +544,6 @@ policy/permission gate.
 These are intentionally **absent** (TODO markers, not built):
 
 - computer use / GUI, images, vision
-- **cross-process / network transport** — the team is in-process and that is the
-  intended scope; there are no external/remote agents
+- **remote/network A2A transport** — the team is currently in-process and there
+  are no external/remote agents. The local supervisor/worker reload boundary in
+  §15 is a lifecycle mechanism, not remote transport.
