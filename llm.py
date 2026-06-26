@@ -6,16 +6,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-REASONING: dict[str, str] = {"effort": "xhigh", "summary": "auto"}
+REASONING: dict[str, str] = {"effort": "xhigh", "summary": "concise"}
 """The fixed reasoning setting for every model call."""
 
-DEFAULT_MAX_OUTPUT_TOKENS = 8192
+DEFAULT_MAX_OUTPUT_TOKENS = 128_000
 """Default maximum model output for normal Responses calls."""
 
-DEFAULT_CONTEXT_TOKENS = 200_000
+DEFAULT_CONTEXT_TOKENS = 256_000
 KNOWN_CONTEXT_WINDOWS: dict[str, int] = {"gpt-5.5": 1_050_000}
 
-DEFAULT_AUTO_COMPACT_RATIO = 0.5
+DEFAULT_AUTO_COMPACT_RATIO = 0.6
 """Codex-style fallback: compact around half the configured context window."""
 
 DEFAULT_TOOL_OUTPUT_TOKENS = 12_000
@@ -67,7 +67,7 @@ def _model_id(model: str) -> str:
     if model.lower().startswith("openai/"):
         model = model.split("/", 1)[1]
     if "/" in model:
-        raise ValueError(f"claw-zero is OpenAI-only; got {model!r}")
+        raise ValueError(f"claw-zero is currently OpenAI-only; got {model!r}")
     return model
 
 
