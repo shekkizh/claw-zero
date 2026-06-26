@@ -33,8 +33,8 @@ DEFAULT_TIMEOUT_SECONDS = 120
 MIN_TIMEOUT_SECONDS = 1
 MAX_TIMEOUT_SECONDS = 600
 
-# Per-stream output cap (chars). Default matches config.max_tool_result_chars.
-DEFAULT_MAX_OUTPUT_CHARS = 16_000
+# Per-stream output cap (chars). Derived from the default 12k-token tool budget.
+DEFAULT_MAX_OUTPUT_CHARS = 40_000
 
 
 LOCAL_SHELL_DESCRIPTION = """\
@@ -168,7 +168,11 @@ class BashTool:
                 "outcome": {"type": "exit", "exit_code": 1},
             })
         for command in commands:
-            result = await self._run_command(command, timeout_seconds, max_output_chars=None)
+            result = await self._run_command(
+                command,
+                timeout_seconds,
+                max_output_chars=max_output_length or self.max_output_chars,
+            )
             output.append(_to_shell_command_output(result))
 
         payload: dict[str, Any] = {

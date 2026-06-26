@@ -10,13 +10,19 @@ from claw_zero.config import ClawZeroConfig
 def test_defaults():
     c = ClawZeroConfig()
     assert c.model == "gpt-5.5"
-    assert c.compaction_threshold == 0.8
-    assert c.max_tool_result_chars == 16_000
+    assert c.auto_compact_token_limit is None
+    assert c.tool_output_token_limit == 12_000
+    assert c.compaction_threshold is None
+    assert c.max_tool_result_chars is None
     assert c.tick_seconds is None
     assert c.agent_id == "claw-zero"
 
 
 def test_validation_rejects_bad_values():
+    with pytest.raises(ValueError):
+        ClawZeroConfig(auto_compact_token_limit=0)
+    with pytest.raises(ValueError):
+        ClawZeroConfig(tool_output_token_limit=0)
     with pytest.raises(ValueError):
         ClawZeroConfig(compaction_threshold=0)
     with pytest.raises(ValueError):

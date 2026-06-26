@@ -98,6 +98,8 @@ class Team:
             agent_id=agent_id,
             model=model,
             base_dir=self._config.base_dir,
+            auto_compact_token_limit=self._config.auto_compact_token_limit,
+            tool_output_token_limit=self._config.tool_output_token_limit,
             compaction_threshold=self._config.compaction_threshold,
             max_tool_result_chars=self._config.max_tool_result_chars,
             agents_md=self._agents_md,

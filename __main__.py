@@ -50,12 +50,20 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
     parser.add_argument("--tick-seconds", type=float, default=None, help="Self-tick interval, applied to every agent (default: off)")
     parser.add_argument("--base-dir", default=None, help="State root (default: claw_zero_state)")
     parser.add_argument(
-        "--compaction-threshold", type=float, default=ClawZeroConfig.compaction_threshold,
-        help="Context fraction that triggers compaction (default: %(default)s)",
+        "--auto-compact-token-limit", type=int, default=None,
+        help="Prompt-token count that triggers compaction (default: Codex-style model-derived limit)",
     )
     parser.add_argument(
-        "--max-tool-result-chars", type=int, default=ClawZeroConfig.max_tool_result_chars,
-        help="Per-tool-result char cap (default: %(default)s)",
+        "--tool-output-token-limit", type=int, default=ClawZeroConfig.tool_output_token_limit,
+        help="Approximate per-tool-output token cap (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--compaction-threshold", type=float, default=None,
+        help="Compatibility alias: context fraction that triggers compaction when no token limit is set",
+    )
+    parser.add_argument(
+        "--max-tool-result-chars", type=int, default=None,
+        help="Compatibility alias: per-tool-result char cap",
     )
     parser.add_argument("--context-window-tokens", type=int, default=None, help="Override resolved context window")
     args = parser.parse_args(argv)
@@ -68,6 +76,8 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
         allow_spawn=not args.no_spawn,
         tick_seconds=args.tick_seconds,
         base_dir=args.base_dir,
+        auto_compact_token_limit=args.auto_compact_token_limit,
+        tool_output_token_limit=args.tool_output_token_limit,
         compaction_threshold=args.compaction_threshold,
         max_tool_result_chars=args.max_tool_result_chars,
         context_window_tokens=args.context_window_tokens,

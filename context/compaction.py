@@ -18,6 +18,13 @@ from .token_estimation import (
 
 BASE_CHUNK_RATIO = 0.4
 MIN_CHUNK_RATIO = 0.15
+DEFAULT_MAX_HISTORY_SHARE = 0.6
+"""Post-compaction raw history target as a share of the context window.
+
+This is intentionally separate from ``BASE_CHUNK_RATIO``: chunk ratio controls
+summarizer request size, while history share controls how much recent raw state
+survives after compaction.
+"""
 SUMMARIZATION_OVERHEAD_TOKENS = 4096
 DEFAULT_SUMMARY_FALLBACK = "No prior history."
 MAX_SUMMARIZATION_RETRIES = 3
@@ -433,7 +440,7 @@ async def compact_messages(
     context_window: int,
     *,
     instructions_tokens: int = 0,
-    max_history_share: float = BASE_CHUNK_RATIO,
+    max_history_share: float = DEFAULT_MAX_HISTORY_SHARE,
     recent_turns_preserve: int = 3,
     timeout: int = SUMMARIZATION_TIMEOUT,
 ) -> CompactionResult:
@@ -445,7 +452,7 @@ async def compact_messages(
         context_window: Context window size in tokens.
         instructions_tokens: Estimated system-prompt token count (subtracted from
             the kept budget).
-        max_history_share: Share of the window budgeted for kept history (0.4).
+        max_history_share: Share of the window budgeted for kept history.
         recent_turns_preserve: Recent turns (assistant messages) never summarized.
 
     Returns:

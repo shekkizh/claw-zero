@@ -6,7 +6,9 @@ import json
 from claw_zero import llm
 from claw_zero.context import token_estimation as te
 from claw_zero.context.compaction import (
+    BASE_CHUNK_RATIO,
     CompactionResult,
+    DEFAULT_MAX_HISTORY_SHARE,
     compact_messages,
     repair_tool_use_result_pairing,
     split_preserved_recent_turns,
@@ -72,6 +74,10 @@ def test_split_preserves_recent_turns():
     assert any(m["content"] == "a5" for m in preserved)
     assert any(m["content"] == "a4" for m in preserved)
     assert all(m["content"] != "a5" for m in pruneable)
+
+
+def test_default_retained_history_share_is_less_aggressive_than_chunking():
+    assert DEFAULT_MAX_HISTORY_SHARE > BASE_CHUNK_RATIO
 
 
 # --- compaction (mocked summarizer) ----------------------------------------

@@ -25,10 +25,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import inner_loop
-from .context.token_estimation import estimate_message_tokens
+from .context.token_estimation import estimate_message_tokens, token_limit_to_char_cap
 from .context.transcript import Transcript
 from .inner_loop import ActivationContext
-from .llm import resolve_context_window
+from .llm import DEFAULT_TOOL_OUTPUT_TOKENS, default_auto_compact_token_limit, resolve_context_window
 from .memory.flush import FlushState
 from .memory.store import MemoryStore
 from .messaging.bus import MessageBus
@@ -54,9 +54,11 @@ class Agent:
     transcript: Transcript
     tools: ToolRegistry
     context_window: int
-    compaction_threshold: float = 0.8
-    max_tool_result_chars: int = 16_000
+    auto_compact_token_limit: int
+    tool_output_token_limit: int = DEFAULT_TOOL_OUTPUT_TOKENS
+    max_tool_result_chars: int = token_limit_to_char_cap(DEFAULT_TOOL_OUTPUT_TOKENS)
     context_files: list[ContextFile] = field(default_factory=list)
+    last_api_input_tokens: int = 0
 
     # Mutable cross-activation state.
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -69,8 +71,10 @@ class Agent:
         agent_id: str,
         model: str,
         base_dir: str | None = None,
-        compaction_threshold: float = 0.8,
-        max_tool_result_chars: int = 16_000,
+        auto_compact_token_limit: int | None = None,
+        tool_output_token_limit: int = DEFAULT_TOOL_OUTPUT_TOKENS,
+        compaction_threshold: float | None = None,
+        max_tool_result_chars: int | None = None,
         cwd: str | None = None,
         agents_md: str | None = None,
         context_window: int | None = None,
@@ -90,8 +94,23 @@ class Agent:
         transcript = Transcript(agent_id=agent_id, base_dir=base_dir)
         transcript.init_session(model=model)
 
+        resolved_context_window = context_window or resolve_context_window(model)
+        compact_limit = auto_compact_token_limit
+        if compact_limit is None:
+            compact_limit = (
+                int(resolved_context_window * compaction_threshold)
+                if compaction_threshold is not None
+                else default_auto_compact_token_limit(resolved_context_window)
+            )
+        if not 0 < compact_limit <= resolved_context_window:
+            raise ValueError(
+                "auto_compact_token_limit must be in (0, context_window], "
+                f"got {compact_limit!r} for window {resolved_context_window!r}"
+            )
+        tool_output_char_cap = max_tool_result_chars or token_limit_to_char_cap(tool_output_token_limit)
+
         tools = build_tools(
-            BashTool(cwd=cwd, max_output_chars=max_tool_result_chars),
+            BashTool(cwd=cwd, max_output_chars=tool_output_char_cap),
             *(extra_tools or []),
         )
 
@@ -108,9 +127,10 @@ class Agent:
             memory_store=memory_store,
             transcript=transcript,
             tools=tools,
-            context_window=context_window or resolve_context_window(model),
-            compaction_threshold=compaction_threshold,
-            max_tool_result_chars=max_tool_result_chars,
+            context_window=resolved_context_window,
+            auto_compact_token_limit=compact_limit,
+            tool_output_token_limit=tool_output_token_limit,
+            max_tool_result_chars=tool_output_char_cap,
             context_files=context_files,
         )
 
@@ -218,11 +238,13 @@ async def run(
             flush_state=agent.flush_state,
             incoming=msg,
             context_window=agent.context_window,
-            compaction_threshold=agent.compaction_threshold,
-            max_tool_result_chars=agent.max_tool_result_chars,
+            auto_compact_token_limit=agent.auto_compact_token_limit,
+            tool_output_token_limit=agent.tool_output_token_limit,
             instructions_tokens=estimate_message_tokens({"role": "system", "content": system_prompt}),
+            last_api_input_tokens=agent.last_api_input_tokens,
         )
 
         reply = await inner_loop.run(ctx)
+        agent.last_api_input_tokens = ctx.last_api_input_tokens
         await deliver(reply, bus)
         # loop forever; no exit condition

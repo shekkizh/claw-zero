@@ -18,15 +18,17 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..llm import DEFAULT_AUTO_COMPACT_RATIO, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_TOOL_OUTPUT_TOKENS
+
 if TYPE_CHECKING:
     from .store import MemoryStore
 
 
 SILENT_REPLY_TOKEN = "[!silent]"
 
-DEFAULT_COMPACTION_RATIO = 0.80
+DEFAULT_COMPACTION_RATIO = DEFAULT_AUTO_COMPACT_RATIO
 SOFT_THRESHOLD_TOKENS = 4000
-RESERVE_TOKENS_FLOOR = 20_000
+RESERVE_TOKENS_FLOOR = DEFAULT_MAX_OUTPUT_TOKENS + DEFAULT_TOOL_OUTPUT_TOKENS
 FORCE_TRANSCRIPT_BYTES = 2 * 1024 * 1024  # 2 MB; set 0 to disable
 
 FLUSH_SYSTEM_PROMPT = (
@@ -71,6 +73,7 @@ def should_run_memory_flush(
     current_tokens: int,
     context_window: int,
     transcript_bytes: int = 0,
+    auto_compact_token_limit: int | None = None,
     compaction_ratio: float = DEFAULT_COMPACTION_RATIO,
     soft_threshold_tokens: int = SOFT_THRESHOLD_TOKENS,
     reserve_tokens: int = RESERVE_TOKENS_FLOOR,
@@ -78,8 +81,12 @@ def should_run_memory_flush(
 ) -> bool:
     """Decide whether a pre-compaction flush should run (token OR transcript trigger)."""
     by_tokens = False
-    if current_tokens > 0 and 0 < compaction_ratio <= 1:
-        trigger = int(context_window * compaction_ratio)
+    if current_tokens > 0:
+        trigger = auto_compact_token_limit
+        if trigger is None and 0 < compaction_ratio <= 1:
+            trigger = int(context_window * compaction_ratio)
+        if trigger is None:
+            trigger = 0
         threshold = max(0, trigger - reserve_tokens - soft_threshold_tokens)
         by_tokens = threshold > 0 and current_tokens >= threshold
 
@@ -212,6 +219,7 @@ async def maybe_flush_memory(
     current_tokens: int,
     context_window: int,
     transcript_bytes: int = 0,
+    auto_compact_token_limit: int | None = None,
     compaction_ratio: float = DEFAULT_COMPACTION_RATIO,
 ) -> bool:
     """Run a flush iff the triggers say so. Returns True if a flush ran."""
@@ -220,6 +228,7 @@ async def maybe_flush_memory(
         current_tokens=current_tokens,
         context_window=context_window,
         transcript_bytes=transcript_bytes,
+        auto_compact_token_limit=auto_compact_token_limit,
         compaction_ratio=compaction_ratio,
     ):
         return False

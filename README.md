@@ -54,6 +54,8 @@ python -m claw_zero --tick-seconds 60                   # self-tick every 60s (o
 python -m claw_zero --base-dir ./state                  # where memory + transcript live
 python -m claw_zero --agents planner,coder,reviewer     # launch a team (flat peer mesh)
 python -m claw_zero --no-spawn                          # forbid runtime spawn_agent
+python -m claw_zero --auto-compact-token-limit 64000    # explicit compaction trigger
+python -m claw_zero --tool-output-token-limit 12000     # per-tool-output token budget
 python -m claw_zero --help                              # all knobs
 ```
 
@@ -184,6 +186,21 @@ Long runs compact **in place** (`context/compaction.py`): recent turns are
 preserved, older history is LLM-summarized into a checkpoint, and
 tool_call/tool_result pairing is repaired so the conversation stays valid. An
 append-only JSONL transcript (`context/transcript.py`) records every turn.
+The primary trigger is an OpenAI/Codex-style `auto_compact_token_limit`; by
+default it is derived as half of the resolved context window, and
+`--compaction-threshold` remains only as a compatibility alias. Budget checks use
+the latest OpenAI `usage.input_tokens` value as the floor; when the local chars/4
+estimate alone would force compaction, claw-zero asks OpenAI's token-counting
+endpoint for the exact input size first. Compaction is checked before API calls
+and after appended assistant/tool outputs, with the memory flush running first.
+Post-compaction raw history retention is intentionally separate from
+summarization chunk size: chunks target 40% of the window, while retained raw
+history can use up to 60%.
+
+Tool output is budgeted in approximate tokens (`--tool-output-token-limit`,
+default 12K, matching Codex's public config example). Local shell/function
+outputs convert that token budget into a conservative character cap before they
+are stored back into conversation state.
 
 ## Layout
 
@@ -205,6 +222,6 @@ claw-zero/                 # repo root == the claw_zero package
 ├── tools/                 # bash.py (local Shell executor), send_message.py, spawn_agent.py, registry.py
 ├── context/               # token_estimation.py, compaction.py, transcript.py
 ├── memory/                # store.py (MemoryStore), flush.py (pre-compaction flush)
-├── tests/                 # 68 tests (pytest)
+├── tests/                 # pytest suite
 └── docs/                  # PORTING.md (KEEP/PORT/DROP map), summaries, comparison, TODO
 ```

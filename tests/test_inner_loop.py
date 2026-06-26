@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from claw_zero import inner_loop, llm
+from claw_zero.context.compaction import CompactionResult
 from claw_zero.context.transcript import Transcript
 from claw_zero.inner_loop import ActivationContext
 from claw_zero.memory.flush import FlushState
@@ -27,6 +28,12 @@ def _make_ctx(tmp_path, incoming_content: str) -> ActivationContext:
         flush_state=FlushState(),
         incoming=incoming,
     )
+
+
+def test_current_tokens_uses_api_input_token_floor(tmp_path):
+    ctx = _make_ctx(tmp_path, "short")
+    ctx.last_api_input_tokens = 9000
+    assert inner_loop._current_tokens(ctx) == 9000
 
 
 def test_activation_runs_shell_then_delivers_message(tmp_path, monkeypatch):
@@ -91,6 +98,59 @@ def test_activation_with_no_tool_call_delivers_immediately(tmp_path, monkeypatch
     delivered = asyncio.run(inner_loop.run(ctx))
     assert delivered.content == "hi there"
     assert delivered.recipient == "operator"
+
+
+def test_activation_compacts_after_final_reply_when_api_usage_over_budget(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path, "finish and reply")
+    ctx.transcript.init_session(model=ctx.model)
+    ctx.context_window = 100
+    ctx.auto_compact_token_limit = 50
+    compact_calls = {"n": 0}
+
+    async def fake_call(model, messages, **kwargs):
+        return llm.LLMResult(
+            text="done",
+            tool_calls=[],
+            finish_reason="stop",
+            usage={"input_tokens": 80},
+        )
+
+    async def fake_compact(messages, model, context_window, **kwargs):
+        compact_calls["n"] += 1
+        return CompactionResult(
+            summary="## Goal\nContinue from compacted state.",
+            tokens_before=80,
+            tokens_after=10,
+            first_kept_message_index=len(messages),
+            chunks_processed=1,
+        )
+
+    monkeypatch.setattr(llm, "call", fake_call)
+    monkeypatch.setattr(inner_loop, "compact_messages", fake_compact)
+
+    delivered = asyncio.run(inner_loop.run(ctx))
+
+    assert delivered.content == "done"
+    assert compact_calls["n"] == 1
+    assert ctx.last_api_input_tokens == 0
+    assert len(ctx.messages) == 1
+    assert "Continue from compacted state" in ctx.messages[0]["content"]
+
+
+def test_exact_count_can_prevent_estimate_only_compaction(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path, "x" * 500)
+    ctx.auto_compact_token_limit = 50
+
+    async def fake_count_input_tokens(model, messages, **kwargs):
+        return 40
+
+    monkeypatch.setattr(llm, "count_input_tokens", fake_count_input_tokens)
+
+    current = asyncio.run(inner_loop._current_tokens_for_budget(ctx))
+
+    assert current == 40
+    assert ctx.last_api_input_tokens == 40
+    assert inner_loop._over_budget(ctx, current) is False
 
 
 def test_activation_records_hosted_search_call_and_result(tmp_path, monkeypatch):

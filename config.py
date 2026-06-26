@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .llm import DEFAULT_TOOL_OUTPUT_TOKENS
+
 
 @dataclass
 class ClawZeroConfig:
@@ -40,12 +42,21 @@ class ClawZeroConfig:
     """Override the resolved context window. None → resolve from the model
     (falls back to 200K when no local OpenAI metadata is known)."""
 
-    compaction_threshold: float = 0.8
-    """Fraction of the context window at which compaction (and the
-    pre-compaction memory flush) trigger."""
+    auto_compact_token_limit: int | None = None
+    """Prompt-token count at which compaction triggers. None → use the
+    Codex-style default derived from the resolved context window."""
 
-    max_tool_result_chars: int = 16_000
-    """Per-tool-result content cap (also the bash per-stream truncation cap)."""
+    tool_output_token_limit: int = DEFAULT_TOOL_OUTPUT_TOKENS
+    """Approximate per-tool-output token cap. Converted to a conservative local
+    character cap for shell/function outputs."""
+
+    compaction_threshold: float | None = None
+    """Compatibility alias. If set and ``auto_compact_token_limit`` is unset,
+    compaction triggers at this fraction of the resolved context window."""
+
+    max_tool_result_chars: int | None = None
+    """Compatibility alias for the local character cap. Prefer
+    ``tool_output_token_limit``."""
 
     tick_seconds: float | None = None
     """Self-tick interval in seconds. None = off (no background tick coroutine)."""
@@ -58,11 +69,26 @@ class ClawZeroConfig:
     """Root for state (memory + transcript). None → ``claw_zero_state``."""
 
     def __post_init__(self) -> None:
-        if not 0 < self.compaction_threshold <= 1:
+        if (
+            self.auto_compact_token_limit is not None
+            and self.auto_compact_token_limit <= 0
+        ):
+            raise ValueError(
+                "auto_compact_token_limit must be positive or None, "
+                f"got {self.auto_compact_token_limit!r}"
+            )
+        if self.tool_output_token_limit <= 0:
+            raise ValueError(
+                f"tool_output_token_limit must be positive, got {self.tool_output_token_limit!r}"
+            )
+        if (
+            self.compaction_threshold is not None
+            and not 0 < self.compaction_threshold <= 1
+        ):
             raise ValueError(
                 f"compaction_threshold must be in (0, 1], got {self.compaction_threshold!r}"
             )
-        if self.max_tool_result_chars <= 0:
+        if self.max_tool_result_chars is not None and self.max_tool_result_chars <= 0:
             raise ValueError(
                 f"max_tool_result_chars must be positive, got {self.max_tool_result_chars!r}"
             )
@@ -88,5 +114,7 @@ class ClawZeroConfig:
             if not isinstance(name, str) or not name.strip():
                 raise ValueError(f"agent ids must be non-empty strings, got {name!r}")
             if name in seen:
-                raise ValueError(f"duplicate participant name {name!r} (clashes with operator or another agent)")
+                raise ValueError(
+                    f"duplicate participant name {name!r} (clashes with operator or another agent)"
+                )
             seen.add(name)

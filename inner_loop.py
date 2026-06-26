@@ -10,6 +10,7 @@ Flow (matching the Phase 7 brief):
 
     loop:
         flush_memory_if_triggered()                 # Phase 5 — before compaction
+        if over_budget(): compact_in_place()        # Phase 6
         result = llm.call(system, messages, tools)  # Phase 2 - OpenAI Responses
         append assistant turn to messages + transcript
         if result.has_tool_calls:
@@ -29,7 +30,7 @@ from typing import Any
 
 from . import llm
 from .context.compaction import compact_messages
-from .context.token_estimation import SAFETY_MARGIN, estimate_messages_tokens
+from .context.token_estimation import SAFETY_MARGIN, estimate_messages_tokens, token_limit_to_char_cap
 from .context.transcript import Transcript
 from .memory.flush import FlushState, maybe_flush_memory
 from .memory.store import MemoryStore
@@ -60,9 +61,11 @@ class ActivationContext:
         flush_state: Pre-compaction flush bookkeeping.
         incoming: The message that triggered this activation.
         context_window: Model context window in tokens.
-        compaction_threshold: Fraction of the window that triggers compaction.
-        max_tool_result_chars: Per-tool-result content cap.
+        auto_compact_token_limit: Prompt-token count that triggers compaction.
+        tool_output_token_limit: Approximate per-tool-result content cap.
         instructions_tokens: Estimated system-prompt token count (budget input).
+        last_api_input_tokens: Most recent API-reported prompt size, used as a
+            floor on heuristic estimates until the next compaction.
     """
 
     model: str
@@ -74,9 +77,10 @@ class ActivationContext:
     flush_state: FlushState
     incoming: Message
     context_window: int = 200_000
-    compaction_threshold: float = 0.8
-    max_tool_result_chars: int = 16_000
+    auto_compact_token_limit: int = 100_000
+    tool_output_token_limit: int = llm.DEFAULT_TOOL_OUTPUT_TOKENS
     instructions_tokens: int = field(default=0)
+    last_api_input_tokens: int = field(default=0)
 
     @property
     def agent_id(self) -> str:
@@ -181,9 +185,10 @@ def _transcript_tool_results(result: "llm.LLMResult") -> list[dict[str, Any]]:
     return results
 
 
-def _format_tool_result(result: dict[str, Any], cap: int) -> str:
+def _format_tool_result(result: dict[str, Any], token_limit: int) -> str:
     """Render a tool handler's result dict as the tool message content (capped)."""
     text = json.dumps(result, ensure_ascii=False, default=str)
+    cap = token_limit_to_char_cap(token_limit)
     if len(text) > cap:
         text = text[: cap - 40] + "\n[... tool result truncated ...]"
     return text
@@ -212,7 +217,7 @@ async def _dispatch_tool(ctx: ActivationContext, tool_call: "llm.ToolCall") -> d
     return {
         "role": "tool",
         "tool_call_id": tool_call.id,
-        "content": _format_tool_result(result, ctx.max_tool_result_chars),
+        "content": _format_tool_result(result, ctx.tool_output_token_limit),
     }
 
 
@@ -259,14 +264,64 @@ async def _dispatch_shell(ctx: ActivationContext, shell_call: "llm.ShellCall") -
     return result
 
 
-def _current_tokens(ctx: ActivationContext) -> int:
-    """Estimated prompt tokens = instructions + scaled message estimate."""
+def _estimated_tokens(ctx: ActivationContext) -> int:
+    """Current heuristic prompt tokens including instructions."""
     raw = estimate_messages_tokens(ctx.messages)
     return int(raw * SAFETY_MARGIN) + ctx.instructions_tokens
 
 
-def _over_budget(ctx: ActivationContext) -> bool:
-    return _current_tokens(ctx) > ctx.context_window * ctx.compaction_threshold
+def _current_tokens(ctx: ActivationContext) -> int:
+    """Current prompt tokens, with API-reported usage as the floor when known."""
+    return max(_estimated_tokens(ctx), ctx.last_api_input_tokens)
+
+
+async def _current_tokens_for_budget(ctx: ActivationContext) -> int:
+    """Use exact OpenAI token counting before compacting on a heuristic estimate."""
+    estimated = _estimated_tokens(ctx)
+    current = max(estimated, ctx.last_api_input_tokens)
+    if estimated <= ctx.auto_compact_token_limit or ctx.last_api_input_tokens >= estimated:
+        return current
+    try:
+        exact = await llm.count_input_tokens(
+            ctx.model,
+            ctx.messages,
+            system=ctx.system_prompt,
+            tools=ctx.tools.specs,
+        )
+    except Exception as exc:  # non-fatal: estimation remains the fallback
+        print(f"[TokenCount] failed (using estimate): {exc}")
+        return current
+    if exact > 0:
+        ctx.last_api_input_tokens = exact
+        return exact
+    return current
+
+
+def _over_budget(ctx: ActivationContext, current_tokens: int | None = None) -> bool:
+    tokens = current_tokens if current_tokens is not None else _current_tokens(ctx)
+    return tokens > ctx.auto_compact_token_limit
+
+
+def _record_usage(ctx: ActivationContext, result: "llm.LLMResult") -> None:
+    input_tokens = result.usage.get("input_tokens") if result.usage else None
+    if isinstance(input_tokens, int) and input_tokens > 0:
+        ctx.last_api_input_tokens = input_tokens
+
+
+async def _maybe_flush_then_compact(ctx: ActivationContext) -> None:
+    current_tokens = await _current_tokens_for_budget(ctx)
+    await maybe_flush_memory(
+        model=ctx.model,
+        messages=ctx.messages,
+        memory_store=ctx.memory_store,
+        state=ctx.flush_state,
+        current_tokens=current_tokens,
+        context_window=ctx.context_window,
+        transcript_bytes=ctx.transcript.transcript_bytes,
+        auto_compact_token_limit=ctx.auto_compact_token_limit,
+    )
+    if _over_budget(ctx, current_tokens):
+        await _compact_in_place(ctx)
 
 
 async def _compact_in_place(ctx: ActivationContext) -> None:
@@ -290,6 +345,7 @@ async def _compact_in_place(ctx: ActivationContext) -> None:
     }
     ctx.messages[:] = [summary_msg, *kept]
     ctx.flush_state.compaction_count += 1
+    ctx.last_api_input_tokens = 0
     entry_id = ctx.transcript.append_compaction(
         result.summary, first_kept_entry_id="", tokens_before=result.tokens_before
     )
@@ -307,17 +363,9 @@ async def run(ctx: ActivationContext) -> Message:
     conversation state.
     """
     for _ in range(DEFAULT_MAX_TOOL_ITERATIONS):
-        # 1. Pre-API memory flush (before any compaction can summarize context away).
-        await maybe_flush_memory(
-            model=ctx.model,
-            messages=ctx.messages,
-            memory_store=ctx.memory_store,
-            state=ctx.flush_state,
-            current_tokens=_current_tokens(ctx),
-            context_window=ctx.context_window,
-            transcript_bytes=ctx.transcript.transcript_bytes,
-            compaction_ratio=ctx.compaction_threshold,
-        )
+        # 1. Pre-API memory flush, then compact if the current prompt is already
+        # over budget. The flush runs first so context is durable before shrink.
+        await _maybe_flush_then_compact(ctx)
 
         # 2. The model call (reasoning fixed inside llm.call).
         result = await llm.call(
@@ -326,6 +374,7 @@ async def run(ctx: ActivationContext) -> Message:
             system=ctx.system_prompt,
             tools=ctx.tools.specs,
         )
+        _record_usage(ctx, result)
 
         # 3. Append the assistant turn to messages + transcript.
         assistant_msg = _assistant_message(result)
@@ -358,11 +407,12 @@ async def run(ctx: ActivationContext) -> Message:
                 ctx.messages.append(tool_msg)
                 ctx.transcript.append_message("tool", tool_msg["content"], tool_call_id=tool_call.id)
             # 5. Compact in place if we've crossed the budget.
-            if _over_budget(ctx):
-                await _compact_in_place(ctx)
+            await _maybe_flush_then_compact(ctx)
             continue
 
-        # 6. No tool call → the plain-text reply IS the delivered message.
+        # 6. No tool call → the plain-text reply IS the delivered message. We
+        # still compact first if needed so the next activation starts under budget.
+        await _maybe_flush_then_compact(ctx)
         return Message(
             sender=ctx.agent_id,
             recipient=ctx.incoming.sender,

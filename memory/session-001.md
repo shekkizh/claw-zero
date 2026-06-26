@@ -1,8 +1,56 @@
-# Session 001 — claw-zero build log
+# claw-zero build log
 
 This is the build's own dog-food log (the brief: "you are building the thing that
 needs memory; eat your own dog food"). Runtime state logs live separately under
 the gitignored `claw_zero_state/<agent_id>/memory/`.
+
+## Repo Shape
+
+- `claw-zero` is an OpenAI-only Responses API harness. Do not reintroduce LiteLLM,
+  CUA, GUI/computer-use plumbing, or provider-generic abstractions unless the
+  operator explicitly asks for a broader migration.
+- Internal history remains chat-shaped, but assistant turns can carry raw
+  `response_items`; `llm._responses_input()` replays those raw Responses items
+  on later calls so reasoning/tool output stays paired.
+- Native local Shell is the active command surface. `tools/bash.py` is only the
+  subprocess executor; model-facing tool specs are assembled in
+  `tools/registry.py`.
+- Hosted OpenAI `web_search` is included as a built-in tool spec and has no local
+  handler. Persist web-search calls/results on assistant transcript entries.
+
+## Compaction Principles
+
+- Keep pre-compaction memory flush before any shrink. The flush is the durable
+  escape hatch for observations and curated strategy before older turns are
+  summarized away.
+- Do not couple summarization chunk size to post-compaction retention. Chunk size
+  controls helper request safety; retained-history share controls how much raw
+  recent state survives. Current policy: summary chunks target 40% of context,
+  retained raw history can use up to 60%.
+- Use OpenAI API-reported `usage.input_tokens` as a floor on local chars/4 token
+  estimates until the next compaction. Reset that floor after compaction.
+- The primary compaction trigger is now `auto_compact_token_limit`. Default is
+  Codex-style half of the resolved context window; `compaction_threshold` is a
+  compatibility alias only.
+- When the local estimate alone crosses the compact limit, ask OpenAI's
+  `responses.input_tokens.count()` endpoint for the exact input size before
+  compacting. Do not spend that extra call when the latest reported API usage is
+  already the floor.
+- Tool output is budgeted in approximate tokens (`tool_output_token_limit`,
+  default 12K). Convert to a conservative local character cap only at shell or
+  function-output storage boundaries.
+- Check compaction before API calls and after appended assistant/tool outputs,
+  including final text replies, so the next activation does not inherit an
+  over-budget history.
+- OpenAI now exposes `responses/input_tokens` for exact preflight counting and
+  `responses.compact()` for native opaque state compaction. The current harness
+  still uses manual LLM summary compaction; treat native compaction as a separate
+  migration because it changes stored history shape.
+
+## Verification
+
+- Standard verification for behavior changes: `.venv/bin/pytest` and
+  `git diff --check`.
 
 ## Shipped (all 11 phases, 50 tests green)
 
@@ -182,3 +230,49 @@ the gitignored `claw_zero_state/<agent_id>/memory/`.
 - Verification: focused LLM/context/inner-loop tests passed (25 tests), full
   `.venv/bin/pytest` passed (75 tests), and `git diff --check` passed for the
   touched files.
+
+## 2026-06-26 Compaction policy tuning
+
+- Operator asked whether compaction was too aggressive and pointed to the ALE
+  Claw reference harness. Current `claw-zero` compacted after crossing 80% of
+  the context window but then targeted only 40% retained history because
+  `BASE_CHUNK_RATIO` was reused as `max_history_share`.
+- Compared the ALE Claw reference: later reference code keeps chunk sizing at
+  40% but defaults `compact_messages(..., max_history_share=0.5)`. Also checked
+  official OpenAI docs/tools: Responses returns `usage.input_tokens`, provides
+  exact `/responses/input_tokens` counting, and has native
+  `responses.compact()` for opaque first-party compaction.
+- Applied the narrower OpenAI-only policy now: introduced
+  `DEFAULT_MAX_HISTORY_SHARE = 0.6`, kept summarization chunk ratio at 0.4,
+  persisted the latest API `usage.input_tokens` as a floor on heuristic estimates,
+  reset that floor after compaction, and check flush/compaction before API calls
+  plus after both tool-call turns and final text replies.
+- Left native `responses.compact()` as a future migration because it changes the
+  model-visible stored history from human-readable summary messages to opaque
+  compaction items.
+- Verification: focused compaction/inner/outer/memory tests passed (32 tests),
+  full `.venv/bin/pytest` passed (78 tests), and `git diff --check` passed.
+
+## 2026-06-26 Token-limit policy cleanup
+
+- Operator asked whether the hardcoded token limits/numbers were principled and
+  requested minimal OpenAI/Codex-aligned changes.
+- Replaced ratio-first compaction with `auto_compact_token_limit` as the primary
+  config/loop trigger. Default is derived as half of the resolved context window;
+  `compaction_threshold` remains as a compatibility alias when no explicit token
+  limit is set.
+- Added `tool_output_token_limit` defaulting to 12,000 approximate tokens
+  (Codex public config example). Local shell/function output converts that token
+  budget to a conservative character cap; the old `max_tool_result_chars` path
+  remains as a compatibility override.
+- Added `llm.count_input_tokens()` using the installed OpenAI SDK's
+  `responses.input_tokens.count()` method. The inner loop calls it only when the
+  heuristic estimate alone would force compaction; API-reported
+  `usage.input_tokens` remains the floor after real calls.
+- Flattened usage details into transcript-friendly keys:
+  `cached_input_tokens` and `reasoning_output_tokens` when returned by the SDK.
+- Memory flush threshold now takes `auto_compact_token_limit` directly and derives
+  its reserve from normal max output tokens plus the tool-output token budget.
+- Verification: focused config/inner/memory/llm/bash tests passed (40 tests),
+  full `.venv/bin/pytest` passed (79 tests), `.venv/bin/python -m compileall -q .`
+  passed, and `git diff --check` passed.

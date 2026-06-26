@@ -9,8 +9,17 @@ from typing import Any
 REASONING: dict[str, str] = {"effort": "xhigh", "summary": "auto"}
 """The fixed reasoning setting for every model call."""
 
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+"""Default maximum model output for normal Responses calls."""
+
 DEFAULT_CONTEXT_TOKENS = 200_000
 KNOWN_CONTEXT_WINDOWS: dict[str, int] = {"gpt-5.5": 1_050_000}
+
+DEFAULT_AUTO_COMPACT_RATIO = 0.5
+"""Codex-style fallback: compact around half the configured context window."""
+
+DEFAULT_TOOL_OUTPUT_TOKENS = 12_000
+"""Approximate per-tool-output budget, matching Codex's public config example."""
 
 CACHE_BOUNDARY = "<!-- CLAW_ZERO_CACHE_BOUNDARY -->"
 """Marker between the byte-stable prompt prefix and volatile runtime suffix."""
@@ -64,6 +73,13 @@ def _model_id(model: str) -> str:
 
 def resolve_context_window(model: str) -> int:
     return KNOWN_CONTEXT_WINDOWS.get(_model_id(model), DEFAULT_CONTEXT_TOKENS)
+
+
+def default_auto_compact_token_limit(context_window: int) -> int:
+    """Default compact trigger when no explicit token limit is configured."""
+    if context_window <= 0:
+        raise ValueError(f"context_window must be positive, got {context_window!r}")
+    return max(1, int(context_window * DEFAULT_AUTO_COMPACT_RATIO))
 
 
 def _strip_boundary(text: str) -> str:
@@ -185,7 +201,7 @@ async def call(
     *,
     system: str | None = None,
     tools: list[dict[str, Any]] | None = None,
-    max_tokens: int = 8192,
+    max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     temperature: float = 1.0,
     timeout: int | None = None,
 ) -> LLMResult:
@@ -204,6 +220,33 @@ async def call(
         )
     )
     return _normalize(response)
+
+
+async def count_input_tokens(
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    system: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    timeout: int | None = None,
+) -> int:
+    """Ask OpenAI for the exact input-token count for a would-be Responses call."""
+    from openai import AsyncOpenAI
+
+    kwargs: dict[str, Any] = {
+        "model": _model_id(model),
+        "input": _responses_input(messages),
+        "reasoning": REASONING,
+    }
+    if system is not None:
+        kwargs["instructions"] = _strip_boundary(system)
+    if tools:
+        kwargs["tools"] = tools
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+
+    result = await AsyncOpenAI().responses.input_tokens.count(**kwargs)
+    return int(result.input_tokens)
 
 
 def _dump_item(item: Any) -> dict[str, Any]:
@@ -399,6 +442,15 @@ def _normalize(response: Any) -> LLMResult:
         for key in ("input_tokens", "output_tokens", "total_tokens")
         if isinstance((val := getattr(usage_obj, key, None)), (int, float)) and val > 0
     } if usage_obj is not None else {}
+    if usage_obj is not None:
+        input_details = getattr(usage_obj, "input_tokens_details", None)
+        cached_tokens = getattr(input_details, "cached_tokens", None)
+        if isinstance(cached_tokens, (int, float)) and cached_tokens >= 0:
+            usage["cached_input_tokens"] = int(cached_tokens)
+        output_details = getattr(usage_obj, "output_tokens_details", None)
+        reasoning_tokens = getattr(output_details, "reasoning_tokens", None)
+        if isinstance(reasoning_tokens, (int, float)) and reasoning_tokens >= 0:
+            usage["reasoning_output_tokens"] = int(reasoning_tokens)
 
     status = getattr(response, "status", "") or ""
     incomplete = getattr(response, "incomplete_details", None)
