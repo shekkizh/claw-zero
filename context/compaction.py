@@ -448,7 +448,7 @@ async def compact_messages(
 
     Args:
         messages: Full chat-shape history to compact.
-        model: OpenAI model id for the summarization call.
+        model: Cerebras model id for the summarization call.
         context_window: Context window size in tokens.
         instructions_tokens: Estimated system-prompt token count (subtracted from
             the kept budget).

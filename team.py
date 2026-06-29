@@ -66,7 +66,7 @@ class Team:
         # Team-capable when there's a roster beyond the primary agent, OR an
         # agent may bring teammates online at runtime. A run that is neither (one
         # agent, no spawn) is the original single-agent claw-zero: baseline
-        # shell/web-search tools, no team prose. Computed up front from config so
+        # shell tools, no team prose. Computed up front from config so
         # it's stable for the whole run (it gates the cached static prompt prefix
         # — see has_team).
         self._team_capable = bool(config.agents) or allow_spawn
@@ -81,7 +81,7 @@ class Team:
         """The team-aware tools, bound to ``agent_id`` and the shared bus.
 
         Empty for a non-team-capable run (absence is the signal — a lone agent
-        keeps only the baseline Shell/web-search surface). Otherwise ``send_message`` is
+        keeps only the baseline Shell surface). Otherwise ``send_message`` is
         always present, and ``spawn_agent`` only when runtime spawning is allowed.
         """
         if not self._team_capable:

@@ -99,11 +99,11 @@ def test_shell_call_output_shape():
 
 def test_registry_local_shell_split():
     reg = build_tools(BashTool())
-    assert [spec["type"] for spec in reg.specs] == ["web_search", "shell"]
-    assert reg.specs[1]["environment"] == {"type": "local"}
+    assert [spec["type"] for spec in reg.specs] == ["shell"]
+    assert reg.specs[0]["environment"] == {"type": "local"}
     assert set(reg.handlers) == set()
     assert callable(reg.shell_handler)
     assert reg.shell_tool is not None
     summaries = get_tool_summaries(reg)
-    assert set(summaries) == {"shell", "web_search"}
+    assert set(summaries) == {"shell"}
     assert summaries["shell"]  # non-empty one-liner

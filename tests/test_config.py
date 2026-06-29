@@ -9,7 +9,7 @@ from claw_zero.config import ClawZeroConfig
 
 def test_defaults():
     c = ClawZeroConfig()
-    assert c.model == "gpt-5.5"
+    assert c.model == "gpt-oss-120b"
     assert c.auto_compact_token_limit is None
     assert c.tool_output_token_limit == 12_000
     assert c.compaction_threshold is None
@@ -81,7 +81,7 @@ def test_importing_config_pulls_no_heavy_or_cua_imports():
     # Importing config (and the package) must not import the LLM SDK or cua-*.
     import claw_zero.config  # noqa: F401
 
-    assert "openai" not in sys.modules
+    assert "cerebras.cloud.sdk" not in sys.modules
     assert not any(name.startswith(("cua", "agent.", "computer")) for name in sys.modules), (
         "a cua/computer module was imported transitively"
     )

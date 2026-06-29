@@ -2,13 +2,13 @@
 
 Mirrors the harness ``tools/tools.py`` ``build_tools`` / ``get_tool_summaries``
 split so the prompt builder reads tool summaries the same way, except the
-surface is minimal. Returns Responses API tool specs (for the LLM call), a
+surface is minimal. Returns Cerebras-compatible tool specs (for the LLM call), a
 ``name -> handler`` map for local function tools, a local Shell executor, and
 the ``name -> one-line summary`` map for the prompt builder.
 
-Hosted tools, like OpenAI web search, do not need local handlers. OpenAI local
-Shell does need a handler, but it uses native ``shell_call`` /
-``shell_call_output`` items rather than a custom function call.
+Cerebras Chat Completions supports client-executed function tools. The local
+Shell is advertised to the model as a synthetic function tool by ``llm.py`` and
+executed here through the ``BashTool`` shell handler.
 """
 
 from __future__ import annotations
@@ -35,12 +35,6 @@ class Tool(Protocol):
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 ShellHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
-WEB_SEARCH_SPEC: dict[str, Any] = {
-    "type": "web_search",
-    "search_context_size": "medium",
-}
-WEB_SEARCH_SUMMARY = "Search the web for up-to-date public information with citations."
-
 LOCAL_SHELL_SPEC: dict[str, Any] = {
     "type": "shell",
     "environment": {"type": "local"},
@@ -59,8 +53,8 @@ class ToolRegistry:
     summaries: dict[str, str]
 
 
-def _to_openai_spec(tool: Tool) -> dict[str, Any]:
-    """Render a tool as an OpenAI Responses function-tool spec."""
+def _to_cerebras_source_spec(tool: Tool) -> dict[str, Any]:
+    """Render a local tool in claw-zero's flat function-tool source shape."""
     return {
         "type": "function",
         "name": tool.name,
@@ -72,17 +66,16 @@ def _to_openai_spec(tool: Tool) -> dict[str, Any]:
 def build_tools(*tools: Tool) -> ToolRegistry:
     """Assemble a ``ToolRegistry`` from the given tools.
 
-    Hosted web search and local Shell are included by default. Local Shell is
-    backed by the ``BashTool`` instance if one is supplied. Other local tools get
+    Local Shell is included by default and backed by the ``BashTool`` instance
+    if one is supplied. Other local tools get
     function handlers so the loop can dispatch function calls emitted by the
     model.
     """
-    specs: list[dict[str, Any]] = [dict(WEB_SEARCH_SPEC), dict(LOCAL_SHELL_SPEC)]
+    specs: list[dict[str, Any]] = [dict(LOCAL_SHELL_SPEC)]
     handlers: dict[str, ToolHandler] = {}
     shell_handler: ShellHandler | None = None
     shell_tool: Any | None = None
     summaries: dict[str, str] = {
-        "web_search": WEB_SEARCH_SUMMARY,
         "shell": LOCAL_SHELL_SUMMARY,
     }
     for tool in tools:
@@ -92,7 +85,7 @@ def build_tools(*tools: Tool) -> ToolRegistry:
             shell_tool = tool
             summaries["shell"] = tool.description.split("\n", 1)[0].strip()
             continue
-        specs.append(_to_openai_spec(tool))
+        specs.append(_to_cerebras_source_spec(tool))
         handlers[tool.name] = tool.run
         # The prompt's Tools section shows a one-line summary: first line of the
         # full description (the rest is the model-facing detail, already in the

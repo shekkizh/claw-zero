@@ -1,4 +1,6 @@
-"""Phase 2 - unit tests for llm.py's offline adapter pieces."""
+"""Unit tests for llm.py's Cerebras adapter pieces."""
+
+import json
 
 import pytest
 
@@ -6,15 +8,15 @@ from claw_zero import llm
 from claw_zero.llm import CACHE_BOUNDARY
 
 
-def test_resolve_context_window_openai_only():
-    assert llm.resolve_context_window("gpt-5.5") == 1_050_000
-    assert llm.resolve_context_window("openai/gpt-5.5") == 1_050_000
+def test_resolve_context_window_cerebras_only():
+    assert llm.resolve_context_window("gpt-oss-120b") == 128_000
+    assert llm.resolve_context_window("cerebras/gpt-oss-120b") == 128_000
     assert llm.resolve_context_window("future-model") == llm.DEFAULT_CONTEXT_TOKENS
-    with pytest.raises(ValueError, match="OpenAI-only"):
+    with pytest.raises(ValueError, match="Cerebras-only"):
         llm.resolve_context_window("anthropic/claude-opus-4-8")
 
 
-def test_responses_input_converts_chat_history_without_mutating():
+def test_chat_messages_converts_tool_history_without_mutating():
     msgs = [
         {
             "role": "assistant",
@@ -30,113 +32,130 @@ def test_responses_input_converts_chat_history_without_mutating():
         {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}'},
         {"role": "user", "content": "hi"},
     ]
-    items = llm._responses_input(msgs)
+    items = llm._chat_messages(msgs)
     assert items == [
-        {"role": "assistant", "content": "old"},
         {
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "send_message",
-            "arguments": '{"to": "coder", "content": "go"}',
+            "role": "assistant",
+            "content": "old",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "send_message", "arguments": '{"to": "coder", "content": "go"}'},
+                }
+            ],
         },
-        {"type": "function_call_output", "call_id": "call_1", "output": '{"ok": true}'},
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}'},
         {"role": "user", "content": "hi"},
     ]
     assert len(msgs) == 3
 
 
-def test_responses_input_replays_stored_response_items():
+def test_chat_messages_replays_stored_shell_response_items():
     response_items = [
-        {"type": "reasoning", "id": "rs_1", "summary": []},
         {
-            "type": "shell_call",
-            "call_id": "call_1",
-            "action": {"commands": ["pwd"], "timeout_ms": 120000, "max_output_length": 4096},
-        },
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "arguments": json.dumps({
+                            "commands": ["pwd"],
+                            "timeout_ms": 120000,
+                            "max_output_length": 4096,
+                        }),
+                    },
+                }
+            ],
+        }
     ]
+    shell_output = [{"stdout": "/tmp\n", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}]
     msgs = [
         {"role": "assistant", "content": "", "response_items": response_items},
         {
             "type": "shell_call_output",
             "call_id": "call_1",
             "max_output_length": 4096,
-            "output": [{"stdout": "/tmp\n", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}],
+            "output": shell_output,
         },
     ]
-    assert llm._responses_input(msgs) == [
-        *response_items,
-        {
-            "type": "shell_call_output",
-            "call_id": "call_1",
-            "max_output_length": 4096,
-            "output": [{"stdout": "/tmp\n", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}],
-        },
+    assert llm._chat_messages(msgs) == [
+        response_items[0],
+        {"role": "tool", "tool_call_id": "call_1", "content": json.dumps(shell_output, ensure_ascii=False)},
     ]
 
 
-def test_build_openai_kwargs_maps_parameters():
-    tool = {
-        "type": "shell",
-        "environment": {"type": "local"},
+def test_build_cerebras_kwargs_maps_parameters_and_tools():
+    shell_tool = {"type": "shell", "environment": {"type": "local"}}
+    function_tool = {
+        "type": "function",
+        "name": "send_message",
+        "description": "Send a message.",
+        "parameters": {"type": "object", "properties": {"to": {"type": "string"}}},
     }
-    kwargs = llm._build_openai_kwargs(
-        model="openai/gpt-5.5",
+    kwargs = llm._build_cerebras_kwargs(
+        model="cerebras/gpt-oss-120b",
         messages=[{"role": "user", "content": "hi"}],
         system=f"SYS{CACHE_BOUNDARY}DYNAMIC",
-        tools=[tool],
+        tools=[shell_tool, function_tool, {"type": "web_search"}],
         max_tokens=123,
         temperature=1.0,
         timeout=30,
     )
-    assert kwargs == {
-        "model": "gpt-5.5",
-        "input": [{"role": "user", "content": "hi"}],
-        "instructions": "SYS\n\nDYNAMIC",
-        "max_output_tokens": 123,
-        "temperature": 1.0,
-        "reasoning": {"effort": "xhigh", "summary": "auto"},
-        "tools": [tool],
-        "timeout": 30,
-    }
+    assert kwargs["model"] == "gpt-oss-120b"
+    assert kwargs["messages"] == [
+        {"role": "system", "content": "SYS\n\nDYNAMIC"},
+        {"role": "user", "content": "hi"},
+    ]
+    assert kwargs["max_completion_tokens"] == 123
+    assert kwargs["temperature"] == 1.0
+    assert kwargs["reasoning_effort"] == "high"
+    assert kwargs["reasoning_format"] == "hidden"
+    assert kwargs["parallel_tool_calls"] is True
+    assert kwargs["timeout"] == 30
+    assert [tool["function"]["name"] for tool in kwargs["tools"]] == ["shell", "send_message"]
+    assert kwargs["tools"][0]["function"]["parameters"]["required"] == ["commands"]
 
 
-def test_normalize_extracts_text_tool_calls_usage_and_items():
-    class _Text:
-        type = "output_text"
-        text = "running it"
-        annotations = []
-
-    class _Msg:
-        type = "message"
-        content = [_Text()]
+def test_normalize_extracts_text_tool_calls_shell_calls_usage_and_items():
+    class _Fn:
+        def __init__(self, name, arguments):
+            self.name = name
+            self.arguments = arguments
 
     class _Call:
-        type = "function_call"
-        call_id = "call_1"
-        name = "send_message"
-        arguments = '{"to": "coder", "content": "go"}'
+        type = "function"
 
-    class _Action:
-        commands = ["echo hi"]
-        timeout_ms = 120000
-        max_output_length = 4096
+        def __init__(self, id, name, arguments):
+            self.id = id
+            self.function = _Fn(name, arguments)
 
-    class _Shell:
-        type = "shell_call"
-        call_id = "sh_1"
-        action = _Action()
-        status = "in_progress"
+    class _Msg:
+        content = "running it"
+        tool_calls = [
+            _Call("call_1", "send_message", '{"to": "coder", "content": "go"}'),
+            _Call("sh_1", "shell", json.dumps({
+                "commands": ["echo hi"],
+                "timeout_ms": 120000,
+                "max_output_length": 4096,
+            })),
+        ]
+
+    class _Choice:
+        message = _Msg()
+        finish_reason = "tool_calls"
 
     class _Usage:
-        input_tokens = 100
-        output_tokens = 20
+        prompt_tokens = 100
+        completion_tokens = 20
         total_tokens = 120
 
     class _Resp:
-        output = [_Msg(), _Call(), _Shell()]
+        choices = [_Choice()]
         usage = _Usage()
-        status = "completed"
-        incomplete_details = None
 
     result = llm._normalize(_Resp())
     assert result.text == "running it"
@@ -153,95 +172,72 @@ def test_normalize_extracts_text_tool_calls_usage_and_items():
     assert result.usage == {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
     assert result.response_items == [
         {
-            "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": "running it", "annotations": []}],
-        },
-        {
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "send_message",
-            "arguments": '{"to": "coder", "content": "go"}',
-        },
-        {
-            "type": "shell_call",
-            "call_id": "sh_1",
-            "action": {"commands": ["echo hi"], "timeout_ms": 120000, "max_output_length": 4096},
-            "status": "in_progress",
-        },
+            "content": "running it",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "send_message", "arguments": '{"to": "coder", "content": "go"}'},
+                },
+                {
+                    "id": "sh_1",
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "arguments": json.dumps({
+                            "commands": ["echo hi"],
+                            "timeout_ms": 120000,
+                            "max_output_length": 4096,
+                        }),
+                    },
+                },
+            ],
+        }
     ]
 
 
-def test_normalize_appends_web_citation_sources():
-    class _Citation:
-        type = "url_citation"
-        title = "Example"
-        url = "https://example.com/report"
-        start_index = 0
-        end_index = 7
+def test_normalize_maps_usage_details():
+    class _Details:
+        cached_tokens = 11
+        reasoning_tokens = 7
 
-    class _Text:
-        type = "output_text"
-        text = "Current result."
-        annotations = [_Citation()]
+    class _Usage:
+        prompt_tokens = 100
+        completion_tokens = 20
+        total_tokens = 120
+        prompt_tokens_details = _Details()
+        completion_tokens_details = _Details()
 
     class _Msg:
-        type = "message"
-        content = [_Text()]
+        content = "done"
+        tool_calls = []
 
-    class _Search:
-        type = "web_search_call"
-
-        def model_dump(self, exclude_none=True):
-            return {"type": "web_search_call", "id": "ws_1", "status": "completed"}
+    class _Choice:
+        message = _Msg()
+        finish_reason = "stop"
 
     class _Resp:
-        output = [_Search(), _Msg()]
-        usage = None
-        status = "completed"
-        incomplete_details = None
+        choices = [_Choice()]
+        usage = _Usage()
 
     result = llm._normalize(_Resp())
-    assert result.text == "Current result.\n\nSources:\n- Example: https://example.com/report"
-    assert result.response_items[0] == {"type": "web_search_call", "id": "ws_1", "status": "completed"}
-
-
-def test_dump_item_preserves_web_search_call_action_without_model_dump():
-    class _Action:
-        type = "search"
-        query = "latest AI news"
-
-    class _Search:
-        type = "web_search_call"
-        id = "ws_1"
-        status = "completed"
-        action = _Action()
-
-    assert llm._dump_item(_Search()) == {
-        "type": "web_search_call",
-        "id": "ws_1",
-        "status": "completed",
-        "action": {"type": "search", "query": "latest AI news"},
+    assert result.text == "done"
+    assert result.finish_reason == "stop"
+    assert result.usage == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "cached_input_tokens": 11,
+        "reasoning_output_tokens": 7,
     }
 
 
-def test_dump_item_preserves_reasoning_summary_without_model_dump():
-    class _Summary:
-        type = "summary_text"
-        text = "Checked the current state and chose the direct fix."
-
-    class _Reasoning:
-        type = "reasoning"
-        id = "rs_1"
-        status = "completed"
-        summary = [_Summary()]
-
-    assert llm._dump_item(_Reasoning()) == {
-        "type": "reasoning",
-        "id": "rs_1",
-        "status": "completed",
-        "summary": [{
-            "type": "summary_text",
-            "text": "Checked the current state and chose the direct fix.",
-        }],
-    }
+def test_count_input_tokens_is_local_estimate():
+    count = __import__("asyncio").run(llm.count_input_tokens(
+        "gpt-oss-120b",
+        [{"role": "user", "content": "hello"}],
+        system="sys",
+        tools=[{"type": "shell"}],
+    ))
+    assert isinstance(count, int) and count > 0

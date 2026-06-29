@@ -9,7 +9,7 @@ non-user-facing peer agent, importing the high-value Claude Code sections
 
 Prompt-boundary discipline: the static prefix is kept byte-stable. Volatile
 runtime context (date, peers, cwd) is injected **after** the ``CACHE_BOUNDARY``
-marker, and ``llm.py`` consumes that marker before sending the prompt to OpenAI.
+marker, and ``llm.py`` consumes that marker before sending the prompt to Cerebras.
 Never interpolate a timestamp/uuid above the boundary.
 
 Section order (each gated on relevance):

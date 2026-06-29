@@ -85,8 +85,8 @@ class Agent:
         ``agents_md`` (the loaded ``AGENTS.md`` text) is injected as a context
         file. ``extra_tools`` are appended after local Shell — the team tools
         (``send_message``, ``spawn_agent``) come in this way, so a single-agent
-        run that passes none simply has Shell plus hosted web search. The
-        session log and transcript session header are initialized here.
+        run that passes none simply has Shell. The session log and transcript
+        session header are initialized here.
         ``context_window`` overrides the model-resolved window when given.
         """
         memory_store = MemoryStore(agent_id=agent_id, base_dir=base_dir)

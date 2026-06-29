@@ -22,13 +22,13 @@ no hierarchy — a flat peer mesh where coordination is emergent, via messages.
 ## Quickstart
 
 ```bash
-# Install (openai is the only runtime LLM dependency).
+# Install (cerebras_cloud_sdk is the runtime LLM dependency).
 uv pip install -e ".[dev]"     # or: pip install -e ".[dev]"
 # Note: this repo's .venv is created by uv, which does NOT include pip — use
 # `uv pip` (bare `pip` falls back to a system Python and fails requires-python).
 
-# OpenAI credentials live in the environment, never config/argv:
-export OPENAI_API_KEY=...
+# Cerebras credentials live in the environment, never config/argv:
+export CEREBRAS_API_KEY=...
 
 # Run the self-owned loop. You are just a peer over stdio.
 python -m claw_zero
@@ -37,7 +37,7 @@ python -m claw_zero
 Then type a message and press Enter:
 
 ```
-claw-zero [claw-zero] online — model gpt-5.5, context window 1,050,000 tokens. ...
+claw-zero [claw-zero] online — model gpt-oss-120b, context window 128,000 tokens. ...
 What files are in the current directory? Then save a note that you checked.
 [claw-zero] Files: alpha.txt, beta.md. I saved a note in .../memory/session-001.md.
 ```
@@ -49,7 +49,7 @@ activation first).
 ### Useful flags
 
 ```bash
-python -m claw_zero --model gpt-5.5                     # native OpenAI model id
+python -m claw_zero --model gpt-oss-120b                # native Cerebras model id
 python -m claw_zero --tick-seconds 60                   # self-tick every 60s (off by default)
 python -m claw_zero --base-dir ./state                  # where memory + transcript live
 python -m claw_zero --agents planner,coder,reviewer     # launch a team (flat peer mesh)
@@ -74,8 +74,8 @@ python -m claw_zero --agents coder,reviewer
 You (the human) are a named participant too — `operator` by default; rename
 yourself with `--operator-id alex` so agents address you as `alex`.
 
-What changes when there's more than one agent (and nothing otherwise — a lone
-agent is byte-for-byte the original claw-zero):
+What changes when there's more than one agent (a lone agent keeps only the
+baseline local Shell tool):
 
 - **Two team tools appear** ("absence is the signal" — they're only registered
   when the run is team-capable):
@@ -143,8 +143,8 @@ waits for the next message.
 
 ## Tool surface
 
-claw-zero exposes OpenAI's native local `shell` Responses tool, backed by the
-client-side subprocess executor in `tools/bash.py`. It is also the file tool:
+claw-zero exposes a local `shell` tool to Cerebras as a function tool, backed by
+the client-side subprocess executor in `tools/bash.py`. It is also the file tool:
 
 | Need | Use |
 |---|---|
@@ -158,10 +158,6 @@ The working directory **persists** between calls; shell state (env vars,
 functions) does **not** — each call is a fresh `/bin/sh`. Timeouts kill the whole
 process group, so children aren't orphaned. There are no dedicated
 read/write/edit/grep/glob tools and no permission gate.
-
-Agents also receive OpenAI's hosted `web_search` Responses tool for up-to-date
-public information. It is not dispatched locally; OpenAI runs the search inside
-the Responses API call and returns text with URL citation annotations.
 
 ## Durable memory
 
@@ -186,13 +182,14 @@ Long runs compact **in place** (`context/compaction.py`): recent turns are
 preserved, older history is LLM-summarized into a checkpoint, and
 tool_call/tool_result pairing is repaired so the conversation stays valid. An
 append-only JSONL transcript (`context/transcript.py`) records every turn.
-The primary trigger is an OpenAI/Codex-style `auto_compact_token_limit`; by
-default it is derived as half of the resolved context window, and
-`--compaction-threshold` remains only as a compatibility alias. Budget checks use
-the latest OpenAI `usage.input_tokens` value as the floor; when the local chars/4
-estimate alone would force compaction, claw-zero asks OpenAI's token-counting
-endpoint for the exact input size first. Compaction is checked before API calls
-and after appended assistant/tool outputs, with the memory flush running first.
+The primary trigger is a Codex-style `auto_compact_token_limit`; by default it
+is derived as half of the resolved context window, and `--compaction-threshold`
+remains only as a compatibility alias. Budget checks use the latest Cerebras
+`usage.prompt_tokens` value (normalized internally as `input_tokens`) as the
+floor; when the local chars/4 estimate alone would force compaction, claw-zero
+uses the same serialized Cerebras chat payload to make a conservative local
+preflight estimate. Compaction is checked before API calls and after appended
+assistant/tool outputs, with the memory flush running first.
 Post-compaction raw history retention is intentionally separate from
 summarization chunk size: chunks target 40% of the window, while retained raw
 history can use up to 60%.
@@ -212,7 +209,7 @@ claw-zero/                 # repo root == the claw_zero package
 ├── pyproject.toml         # packaging — maps the claw_zero package onto the root
 ├── __main__.py            # entry point — builds the Team, runs it until stdin EOF
 ├── config.py              # ClawZeroConfig (roster + spawn knobs; no LLM effort knob)
-├── llm.py                 # single OpenAI Responses call + context-window fallback
+├── llm.py                 # single Cerebras Chat Completions call + context-window fallback
 ├── prompt.py              # gated "absence is the signal" builder (+ # Team section)
 ├── AGENTS.md              # the persistent operating doc (peer-among-peers ethos)
 ├── team.py                # Team orchestrator — owns the bus, roster, loops, spawn

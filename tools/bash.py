@@ -7,9 +7,9 @@ timeout, middle-truncated ``stdout``/``stderr`` (head + tail preserved so exit
 and error lines survive), and a structured ``{exit_code, stdout, stderr, ...}``
 return.
 
-This class now backs OpenAI's native local Shell tool. ``run`` preserves the
-legacy function-tool shape for tests and internal callers; ``run_shell_call``
-adapts the same executor to Responses ``shell_call_output`` items.
+This class backs claw-zero's local Shell tool. ``run`` preserves the legacy
+function-tool shape for tests and internal callers; ``run_shell_call`` adapts
+the same executor to the ``shell_call_output`` shape used by the inner loop.
 
 The working directory **persists** between calls (a ``cd`` in one call is seen by
 the next), but shell state does **not** — each call is a fresh ``/bin/sh``, so
@@ -38,7 +38,7 @@ DEFAULT_MAX_OUTPUT_CHARS = 40_000
 
 
 LOCAL_SHELL_DESCRIPTION = """\
-Run shell commands on the local machine through OpenAI's native local Shell tool.
+Run shell commands on the local machine through claw-zero's local Shell tool.
 
 The shell is also how you touch the filesystem — there are no dedicated file \
 tools:
@@ -151,7 +151,7 @@ class BashTool:
         return await self._run_command(command, timeout_seconds, max_output_chars=self.max_output_chars)
 
     async def run_shell_call(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Execute a Responses ``shell_call`` action and return ``shell_call_output``."""
+        """Execute a normalized shell action and return ``shell_call_output`` for the inner loop."""
         call_id = params.get("call_id", "")
         commands = params.get("commands", [])
         if isinstance(commands, str):

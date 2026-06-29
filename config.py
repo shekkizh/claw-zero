@@ -2,12 +2,12 @@
 
 Started from the ALE Claw ``config.py`` and stripped of every cua / GUI /
 transport / delegation / web / thinking-level knob. What remains is exactly what
-claw-zero uses. **There is no effort knob** — ``llm.py`` sends the same fixed
-OpenAI reasoning setting on every call.
+claw-zero uses. **There is no effort knob** — ``llm.py`` sends a fixed
+Cerebras reasoning settings where supported.
 
-API keys are NEVER stored here. The OpenAI SDK reads ``OPENAI_API_KEY`` directly
-from the process environment. This module imports nothing heavy (no ``openai``,
-no ``cua-*``).
+API keys are NEVER stored here. The Cerebras SDK reads ``CEREBRAS_API_KEY``
+directly from the process environment. This module imports nothing heavy (no
+``cerebras`` SDK imports, no ``cua-*``).
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from .llm import DEFAULT_TOOL_OUTPUT_TOKENS
 class ClawZeroConfig:
     """Per-run tunables for claw-zero."""
 
-    model: str = "gpt-5.5"
-    """Native OpenAI model id. Reasoning is fixed in ``llm.py``."""
+    model: str = "gpt-oss-120b"
+    """Native Cerebras model id. Reasoning is fixed in ``llm.py`` where supported."""
 
     agents: list[str] = field(default_factory=list)
     """Extra teammate ids to launch at startup, beyond ``agent_id`` (the static
@@ -40,7 +40,7 @@ class ClawZeroConfig:
 
     context_window_tokens: int | None = None
     """Override the resolved context window. None → resolve from the model
-    (falls back to 200K when no local OpenAI metadata is known)."""
+    (falls back to 128K when no local Cerebras metadata is known)."""
 
     auto_compact_token_limit: int | None = None
     """Prompt-token count at which compaction triggers. None → use the

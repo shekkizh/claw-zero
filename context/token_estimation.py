@@ -3,7 +3,7 @@
 Ported from ``harness/context/token_estimation.py`` with the
 ``FIXED_IMAGE_TOKENS`` / base64-image path **removed** — claw-zero has no images.
 A plain ``len(json.dumps(msg)) / 4`` over the serialized message, scaled by
-``SAFETY_MARGIN`` to absorb tokenizer variance. Exact OpenAI usage still wins
+``SAFETY_MARGIN`` to absorb tokenizer variance. API-reported usage still wins
 when available; this module is only the fallback/preflight approximation.
 """
 

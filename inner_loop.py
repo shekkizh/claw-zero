@@ -11,11 +11,11 @@ Flow (matching the Phase 7 brief):
     loop:
         flush_memory_if_triggered()                 # Phase 5 — before compaction
         if over_budget(): compact_in_place()        # Phase 6
-        result = llm.call(system, messages, tools)  # Phase 2 - OpenAI Responses
+        result = llm.call(system, messages, tools)  # Phase 2 - Cerebras Chat Completions
         append assistant turn to messages + transcript
         if result.has_tool_calls:
             execute local shell/function calls
-            append Responses-native outputs
+            append tool outputs
             if over_budget(): compact_in_place()     # Phase 6
             continue
         else:                                        # plain text → deliver
@@ -51,7 +51,7 @@ class ActivationContext:
     conversation persists.
 
     Attributes:
-        model: OpenAI model id.
+        model: Cerebras model id.
         system_prompt: The assembled system prompt for this activation.
         messages: The running chat-shape conversation (mutated in place).
         tools: The tool registry (hosted specs plus local handlers).
@@ -88,10 +88,10 @@ class ActivationContext:
 
 
 def _assistant_message(result: "llm.LLMResult") -> dict[str, Any]:
-    """Reconstruct an OpenAI assistant message from an ``LLMResult``.
+    """Reconstruct an assistant message from an ``LLMResult``.
 
     Keeps the normalized ``tool_calls`` array for local pairing/serialization and
-    the raw Responses output items so the next API request can replay them.
+    the provider metadata so the next API request can replay tool calls.
     """
     msg: dict[str, Any] = {"role": "assistant", "content": result.text or ""}
     if result.tool_calls:
@@ -276,7 +276,7 @@ def _current_tokens(ctx: ActivationContext) -> int:
 
 
 async def _current_tokens_for_budget(ctx: ActivationContext) -> int:
-    """Use exact OpenAI token counting before compacting on a heuristic estimate."""
+    """Use the LLM adapter preflight token counter before compacting on a heuristic estimate."""
     estimated = _estimated_tokens(ctx)
     current = max(estimated, ctx.last_api_input_tokens)
     if estimated <= ctx.auto_compact_token_limit or ctx.last_api_input_tokens >= estimated:

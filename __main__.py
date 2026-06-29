@@ -3,11 +3,11 @@
 Wires up config → Team (bus + one or more agents) → human StdioPeer (+ optional
 self-tick) → memory → prompt → tools, then runs the team until stdin closes. The
 human is just a peer over stdio; agents are equal peers on the same bus. API keys
-are read from the environment by the OpenAI SDK - never from config or argv.
+are read from the environment by the Cerebras SDK - never from config or argv.
 
 Usage:
-    OPENAI_API_KEY=... python -m claw_zero
-    python -m claw_zero --model gpt-5.5 --tick-seconds 60
+    CEREBRAS_API_KEY=... python -m claw_zero
+    python -m claw_zero --model gpt-oss-120b --tick-seconds 60
     python -m claw_zero --agents planner,coder,reviewer   # a team of four
 """
 
@@ -33,7 +33,7 @@ def _load_agents_md() -> str | None:
 
 def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
     parser = argparse.ArgumentParser(prog="claw-zero", description="A self-owned, long-running agent loop (single agent or a team).")
-    parser.add_argument("--model", default=ClawZeroConfig.model, help="OpenAI model id (default: %(default)s)")
+    parser.add_argument("--model", default=ClawZeroConfig.model, help="Cerebras model id (default: %(default)s)")
     parser.add_argument("--agent-id", default=ClawZeroConfig.agent_id, help="This agent's id (default: %(default)s)")
     parser.add_argument(
         "--operator-id", default=ClawZeroConfig.operator_id,
