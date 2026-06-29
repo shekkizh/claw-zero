@@ -276,3 +276,21 @@ the gitignored `claw_zero_state/<agent_id>/memory/`.
 - Verification: focused config/inner/memory/llm/bash tests passed (40 tests),
   full `.venv/bin/pytest` passed (79 tests), `.venv/bin/python -m compileall -q .`
   passed, and `git diff --check` passed.
+
+## 2026-06-28 Cerebras gemma backend smoke test
+
+- Operator asked to test the Cerebras backend for claw-zero using the
+  `gemma-4-31b` model. The API key was sourced from `~/.zshrc` for live tests.
+- Local pytest verification could not run in the current venv:
+  `uv run pytest tests/test_llm.py` failed with `Failed to spawn: pytest`, and
+  `.venv/bin/python -m pytest tests/test_llm.py` failed with
+  `No module named pytest`.
+- Live adapter probe through `claw_zero.llm.call("gemma-4-31b", ...)` reached
+  Cerebras. With `max_tokens=32`, the response returned usage but no text:
+  `finish_reason='length'`, `output_tokens=32`, `reasoning_output_tokens=32`.
+- Repeating the same adapter probe with `max_tokens=512` succeeded with visible
+  text: `claw-zero cerebras backend ok`, `finish_reason='stop'`,
+  `input_tokens=27`, `output_tokens=117`, `reasoning_output_tokens=109`.
+- Full CLI smoke test also passed:
+  `.venv/bin/python -m claw_zero --model gemma-4-31b --base-dir /tmp/claw-zero-cerebras-smoke --no-spawn`
+  replied `[claw-zero] cli cerebras ok` and exited cleanly on stdin EOF.

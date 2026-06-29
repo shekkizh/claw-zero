@@ -103,6 +103,7 @@ def test_build_cerebras_kwargs_maps_parameters_and_tools():
         tools=[shell_tool, function_tool, {"type": "web_search"}],
         max_tokens=123,
         temperature=1.0,
+        top_p=None,
         timeout=30,
     )
     assert kwargs["model"] == "gpt-oss-120b"
@@ -116,8 +117,48 @@ def test_build_cerebras_kwargs_maps_parameters_and_tools():
     assert kwargs["reasoning_format"] == "hidden"
     assert kwargs["parallel_tool_calls"] is True
     assert kwargs["timeout"] == 30
+    assert "top_p" not in kwargs  # no recommendation for gpt-oss-120b
     assert [tool["function"]["name"] for tool in kwargs["tools"]] == ["shell", "send_message"]
     assert kwargs["tools"][0]["function"]["parameters"]["required"] == ["commands"]
+
+
+def test_build_cerebras_kwargs_applies_gemma4_recommended_top_p():
+    kwargs = llm._build_cerebras_kwargs(
+        model="gemma-4-31b",
+        messages=[{"role": "user", "content": "hi"}],
+        system=None,
+        tools=None,
+        max_tokens=1000,
+        temperature=1.0,
+        top_p=None,
+        timeout=None,
+    )
+    assert kwargs["top_p"] == 0.95  # Cerebras recommended default
+    assert kwargs["reasoning_effort"] == "high"
+    assert "reasoning_format" not in kwargs  # hidden not supported for Gemma 4
+
+    # Explicit top_p from caller overrides the recommendation
+    kwargs2 = llm._build_cerebras_kwargs(
+        model="gemma-4-31b",
+        messages=[{"role": "user", "content": "hi"}],
+        system=None,
+        tools=None,
+        max_tokens=1000,
+        temperature=1.0,
+        top_p=0.8,
+        timeout=None,
+    )
+    assert kwargs2["top_p"] == 0.8
+
+
+def test_resolve_max_output_tokens():
+    assert llm.resolve_max_output_tokens("gemma-4-31b") == 40_000
+    assert llm.resolve_max_output_tokens("gpt-oss-120b") == llm.DEFAULT_MAX_OUTPUT_TOKENS
+    assert llm.resolve_max_output_tokens("future-model") == llm.DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def test_gemma4_context_window():
+    assert llm.resolve_context_window("gemma-4-31b") == 131_000
 
 
 def test_normalize_extracts_text_tool_calls_shell_calls_usage_and_items():

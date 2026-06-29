@@ -13,15 +13,30 @@ REASONING_EFFORT = "high"
 REASONING_EFFORT_MODELS = {"gpt-oss-120b", "gemma-4-31b"}
 HIDDEN_REASONING_MODELS = {"gpt-oss-120b", "zai-glm-4.7"}
 
-DEFAULT_MAX_OUTPUT_TOKENS = 16_384
-"""Default maximum completion for normal Cerebras Chat Completions calls."""
+DEFAULT_MAX_OUTPUT_TOKENS = 40_000
+"""Default maximum completion for normal Cerebras Chat Completions calls.
+
+Set to the Gemma 4 31B paid-tier max (40k). Models that need a different
+ceiling are recorded in ``KNOWN_MAX_OUTPUT_TOKENS``."""
 
 DEFAULT_CONTEXT_TOKENS = 128_000
 KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-oss-120b": 128_000,
     "zai-glm-4.7": 128_000,
-    "gemma-4-31b": 128_000,
+    "gemma-4-31b": 131_000,
 }
+
+KNOWN_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "gemma-4-31b": 40_000,
+}
+"""Per-model maximum output tokens (paid tier). Falls back to
+``DEFAULT_MAX_OUTPUT_TOKENS`` when the model is not listed."""
+
+KNOWN_TOP_P: dict[str, float] = {
+    "gemma-4-31b": 0.95,
+}
+"""Per-model recommended ``top_p`` values from Cerebras docs.
+None → omit ``top_p`` from the API call (provider default)."""
 
 DEFAULT_AUTO_COMPACT_RATIO = 0.6
 """Codex-style fallback: compact around half the configured context window."""
@@ -87,6 +102,11 @@ def _model_id(model: str) -> str:
 
 def resolve_context_window(model: str) -> int:
     return KNOWN_CONTEXT_WINDOWS.get(_model_id(model), DEFAULT_CONTEXT_TOKENS)
+
+
+def resolve_max_output_tokens(model: str) -> int:
+    """Return the paid-tier max output token ceiling for *model*."""
+    return KNOWN_MAX_OUTPUT_TOKENS.get(_model_id(model), DEFAULT_MAX_OUTPUT_TOKENS)
 
 
 def default_auto_compact_token_limit(context_window: int) -> int:
@@ -440,15 +460,21 @@ def _build_cerebras_kwargs(
     tools: list[dict[str, Any]] | None,
     max_tokens: int,
     temperature: float,
+    top_p: float | None,
     timeout: int | None,
 ) -> dict[str, Any]:
+    model_id = _model_id(model)
     kwargs: dict[str, Any] = {
-        "model": _model_id(model),
+        "model": model_id,
         "messages": _chat_messages(messages, system=system),
         "max_completion_tokens": max_tokens,
         "temperature": temperature,
         **_reasoning_kwargs(model),
     }
+    # Apply per-model top_p recommendation when the caller doesn't override.
+    effective_top_p = top_p if top_p is not None else KNOWN_TOP_P.get(model_id)
+    if effective_top_p is not None:
+        kwargs["top_p"] = effective_top_p
     converted_tools = _cerebras_tools(tools)
     if converted_tools:
         kwargs["tools"] = converted_tools
@@ -475,6 +501,7 @@ async def call(
     tools: list[dict[str, Any]] | None = None,
     max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     temperature: float = 1.0,
+    top_p: float | None = None,
     timeout: int | None = None,
 ) -> LLMResult:
     """Do one Cerebras Chat Completions API call and normalize it."""
@@ -486,6 +513,7 @@ async def call(
             tools=tools,
             max_tokens=max_tokens,
             temperature=temperature,
+            top_p=top_p,
             timeout=timeout,
         )
     )
