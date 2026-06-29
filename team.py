@@ -34,7 +34,7 @@ from .messaging.peer import Peer, StdioPeer, tick_source
 from .outer_loop import Agent
 from .runtime_state import load_team_state, write_team_state
 from .source_identity import format_source_identity
-from .tools.reload_harness import ReloadHarnessTool, ReloadRequested
+from .tools.reload_harness import ReloadRequested
 from .tools.registry import Tool
 from .tools.send_message import SendMessageTool
 from .tools.spawn_agent import SpawnAgentTool
@@ -62,7 +62,7 @@ class Team:
         *,
         agents_md: str | None = None,
         allow_spawn: bool = True,
-        allow_reload: bool = False,
+        allow_reload: bool = True,
         resume_runtime_state: bool = False,
     ) -> None:
         self._config = config
@@ -89,16 +89,14 @@ class Team:
         """The team-aware tools, bound to ``agent_id`` and the shared bus.
 
         Team tools appear only for a team-capable run (absence is the signal —
-        a lone agent keeps no team prose). ``reload_harness`` is independent and
-        appears only for a supervisor-managed worker.
+        a lone agent keeps no team prose). ``reload_harness`` is a baseline
+        Agent tool, so it is not assembled here.
         """
         tools: list[Tool] = []
         if self._team_capable:
             tools.append(SendMessageTool(self.bus, agent_id))
             if self._allow_spawn:
                 tools.append(SpawnAgentTool(self._spawn, agent_id))
-        if self._allow_reload:
-            tools.append(ReloadHarnessTool())
         return tools
 
     def _build_agent(self, agent_id: str, model: str) -> Agent:
@@ -115,6 +113,7 @@ class Team:
             agents_md=self._agents_md,
             context_window=self._config.context_window_tokens,
             extra_tools=self._team_tools(agent_id),
+            include_reload_tool=self._allow_reload,
             resume_runtime_state=self._resume_runtime_state,
         )
 

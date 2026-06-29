@@ -16,6 +16,8 @@ def test_defaults():
     assert c.max_tool_result_chars is None
     assert c.tick_seconds is None
     assert c.agent_id == "claw-zero"
+    assert c.reload_enabled is True
+    assert c.supervise is True
 
 
 def test_validation_rejects_bad_values():

@@ -1,9 +1,12 @@
 """Entry point — ``python -m claw_zero``.
 
-Wires up config → Team (bus + one or more agents) → human StdioPeer (+ optional
-self-tick) → memory → prompt → tools, then runs the team until stdin closes. The
-human is just a peer over stdio; agents are equal peers on the same bus. API keys
-are read from the environment by the OpenAI SDK - never from config or argv.
+Normal invocation starts a small stable parent process, which launches a worker
+from the current source tree. The worker wires up config → Team (bus + one or
+more agents) → human StdioPeer (+ optional self-tick) → memory → prompt → tools,
+then runs the team until stdin closes. Agents can call ``reload_harness`` after
+source edits; the worker saves state and exits, and the parent starts a fresh
+interpreter. API keys are read from the environment by the OpenAI SDK - never
+from config or argv.
 
 Usage:
     OPENAI_API_KEY=... python -m claw_zero
@@ -15,17 +18,65 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sys
 
 from .config import ClawZeroConfig
+from .messaging.mailbox import Message
 from .messaging.peer import StdioPeer
-from .runtime_state import RELOAD_REQUESTED_EXIT_CODE
+from .runtime_state import (
+    RELOAD_REQUESTED_EXIT_CODE,
+    mark_reload_continue_enqueued,
+    pending_reload_continue,
+)
 from .source_identity import collect_source_identity, format_source_identity
 from .supervisor import supervise_command
 from .team import Team
 from .tools.reload_harness import ReloadRequested
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _enqueue_reload_continue_if_needed(team: Team, config: ClawZeroConfig) -> bool:
+    """After a reload, queue a normal operator ``continue`` message once.
+
+    ``reload_harness`` exits before the agent can produce its final peer reply.
+    The restarted worker has the paired tool result in runtime state, but it
+    needs a fresh inbound message to continue the activation loop. The policy is
+    intentionally simple: add a message from the operator with content
+    ``continue``.
+    """
+    pending = pending_reload_continue(config.base_dir)
+    if pending is None:
+        return False
+    agent_id = pending.get("agent_id")
+    path = pending.get("path")
+    if not isinstance(agent_id, str) or agent_id not in team.agent_ids:
+        return False
+    if not isinstance(path, str) or not path:
+        return False
+    content = "continue"
+    delivered = await team.bus.route(
+        Message(
+            sender=config.operator_id,
+            recipient=agent_id,
+            content=content,
+            kind="message",
+            ts=_now_iso(),
+        )
+    )
+    if delivered:
+        mark_reload_continue_enqueued(
+            path,
+            sender=config.operator_id,
+            recipient=agent_id,
+            content=content,
+        )
+    return delivered
 
 
 def _load_agents_md() -> str | None:
@@ -53,11 +104,7 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
         "--no-spawn", action="store_true",
         help="Disallow runtime spawning of new teammates (drops the spawn_agent tool).",
     )
-    parser.add_argument(
-        "--supervise",
-        action="store_true",
-        help="Run a stable supervisor that restarts the worker when reload_harness is requested.",
-    )
+    parser.add_argument("--supervise", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--resume-runtime-state",
         action="store_true",
@@ -67,7 +114,7 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
         "--max-reloads",
         type=int,
         default=ClawZeroConfig.max_reloads,
-        help="Maximum reload restarts in one supervised run (default: %(default)s).",
+        help="Maximum reload restarts in one run (default: %(default)s).",
     )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--tick-seconds", type=float, default=None, help="Self-tick interval, applied to every agent (default: off)")
@@ -97,9 +144,9 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
         operator_id=args.operator_id,
         agents=roster,
         allow_spawn=not args.no_spawn,
-        reload_enabled=args.worker,
+        reload_enabled=True,
         resume_runtime_state=args.resume_runtime_state,
-        supervise=args.supervise,
+        supervise=not args.worker,
         worker=args.worker,
         max_reloads=args.max_reloads,
         tick_seconds=args.tick_seconds,
@@ -141,6 +188,7 @@ async def _run(config: ClawZeroConfig, argv: list[str] | None = None) -> None:
     )
     print(f"claw-zero {format_source_identity(identity)}", flush=True)
     team.record_worker_start(identity)
+    await _enqueue_reload_continue_if_needed(team, config)
 
     roster = team.agent_ids
     if len(roster) == 1:
@@ -163,7 +211,7 @@ async def _run(config: ClawZeroConfig, argv: list[str] | None = None) -> None:
 
 
 def _worker_argv(raw_argv: list[str]) -> list[str]:
-    child = list(raw_argv)
+    child = [arg for arg in raw_argv if arg != "--supervise"]
     if "--worker" not in child:
         child.append("--worker")
     if "--resume-runtime-state" not in child:
@@ -186,7 +234,7 @@ def main(argv: list[str] | None = None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     config = _parse_args(raw_argv)
     try:
-        if config.supervise and not config.worker:
+        if not config.worker:
             raise SystemExit(asyncio.run(_supervise(raw_argv, config.max_reloads)))
         asyncio.run(_run(config, raw_argv))
     except ReloadRequested as exc:

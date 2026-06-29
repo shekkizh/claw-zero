@@ -1,4 +1,4 @@
-"""reload_harness — request a supervised worker restart from a clean boundary."""
+"""reload_harness — request a clean worker restart from a process boundary."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any
 
 
 class ReloadRequested(RuntimeError):
-    """Signal that the worker should save state and exit for supervisor reload."""
+    """Signal that the worker should save state and exit for reload."""
 
     def __init__(self, *, reason: str, tests_run: str = "", summary: str = "") -> None:
         super().__init__(reason)
@@ -22,7 +22,7 @@ class ReloadRequested(RuntimeError):
             "reason": self.reason,
             "tests_run": self.tests_run,
             "summary": self.summary,
-            "note": "Runtime state was saved and the worker will exit for supervisor restart.",
+            "note": "Runtime state was saved and the worker will exit for parent-process restart.",
         }
 
 
@@ -33,8 +33,10 @@ Use this only after changing harness source files and running the verification \
 that makes sense for the change. The source tree is shared by the whole worker: \
 if one teammate improves the harness, the restarted code applies to all agents \
 in that worker. It does not finish the current peer task by itself: it saves \
-runtime state, asks the worker to exit with the reload code, and expects the \
-supervisor to start a fresh interpreter from the source tree.
+runtime state, asks the worker to exit with the reload code, and lets the \
+built-in parent process start a fresh interpreter from the source tree. After
+restart, the worker queues one normal operator message with content `continue` so
+the requesting agent can proceed from the saved tool result.
 
 Report verification honestly. If no tests were run, say that in `tests_run`."""
 

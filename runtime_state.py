@@ -96,6 +96,67 @@ def save_agent_state(agent: Any, *, reason: str) -> dict[str, Any]:
     return payload
 
 
+def _read_reload_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("version") != 1:
+        return None
+    return payload
+
+
+def pending_reload_continue(base_dir: str | Path | None) -> dict[str, Any] | None:
+    """Return the newest reload_state needing a post-restart continue message.
+
+    A reload request exits before the agent can finish its peer reply. On the
+    next worker start, enqueueing a normal operator message with content
+    ``"continue"`` lets the restored conversation proceed from the paired
+    reload_harness tool result instead of waiting silently for manual input.
+    """
+    root = Path(base_dir if base_dir is not None else DEFAULT_BASE_DIR)
+    if not root.exists():
+        return None
+    candidates: list[tuple[str, Path, dict[str, Any]]] = []
+    for path in root.glob(f"*/{RELOAD_STATE_FILE}"):
+        payload = _read_reload_payload(path)
+        if payload is None or payload.get("continue_enqueued_at"):
+            continue
+        agent_id = payload.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            continue
+        requested_at = payload.get("requested_at") if isinstance(payload.get("requested_at"), str) else ""
+        candidates.append((requested_at, path, payload))
+    if not candidates:
+        return None
+    _requested_at, path, payload = sorted(candidates, key=lambda item: (item[0], str(item[1])))[-1]
+    result = dict(payload)
+    result["path"] = str(path)
+    return result
+
+
+def mark_reload_continue_enqueued(
+    path: str | Path,
+    *,
+    sender: str,
+    recipient: str,
+    content: str = "continue",
+) -> dict[str, Any] | None:
+    """Mark a reload_state as having had its synthetic continue message queued."""
+    reload_path = Path(path)
+    payload = _read_reload_payload(reload_path)
+    if payload is None:
+        return None
+    payload["continue_enqueued_at"] = _now_iso()
+    payload["continue_message"] = {
+        "sender": sender,
+        "recipient": recipient,
+        "content": content,
+    }
+    _write_json(reload_path, payload)
+    return payload
+
+
 def load_team_state(base_dir: str | Path | None) -> dict[str, Any] | None:
     path = team_state_path(base_dir)
     if not path.exists():

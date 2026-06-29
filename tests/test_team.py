@@ -120,16 +120,16 @@ def test_single_agent_run_has_no_team_tools(tmp_path):
     config = _config(tmp_path, agent_id="solo")
     team = Team(config, agents_md="# home", allow_spawn=False)
     agent = team.add_agent("solo")
-    assert set(agent.tools.summaries) == {"shell", "web_search"}
+    assert set(agent.tools.summaries) == {"shell", "read_file", "web_search", "reload_harness"}
     # And a team-capable run does surface the team tools.
     team2 = Team(_config(tmp_path, agent_id="lead", agents=["helper"]), agents_md="# home")
     lead = team2.add_agent("lead")
     assert "send_message" in lead.tools.summaries and "spawn_agent" in lead.tools.summaries
 
 
-def test_reload_tool_is_supervisor_gated_not_team_gated(tmp_path):
+def test_reload_tool_is_baseline_not_team_gated(tmp_path):
     config = _config(tmp_path, agent_id="solo")
-    team = Team(config, agents_md="# home", allow_spawn=False, allow_reload=True)
+    team = Team(config, agents_md="# home", allow_spawn=False)
     agent = team.add_agent("solo")
     assert "reload_harness" in agent.tools.summaries
     assert "send_message" not in agent.tools.summaries

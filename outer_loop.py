@@ -36,7 +36,8 @@ from .messaging.mailbox import Message
 from .prompt import ContextFile, RuntimeContext, build_prompt
 from .runtime_state import load_runtime_state, save_agent_state, write_reload_state
 from .tools.bash import BashTool
-from .tools.reload_harness import ReloadRequested
+from .tools.read_file import ReadFileTool
+from .tools.reload_harness import ReloadHarnessTool, ReloadRequested
 from .tools.registry import Tool, ToolRegistry, build_tools
 
 
@@ -81,16 +82,17 @@ class Agent:
         agents_md: str | None = None,
         context_window: int | None = None,
         extra_tools: list[Tool] | None = None,
+        include_reload_tool: bool = True,
         resume_runtime_state: bool = False,
     ) -> "Agent":
         """Wire up an Agent with its memory store, transcript, and tools.
 
         ``agents_md`` (the loaded ``AGENTS.md`` text) is injected as a context
-        file. ``extra_tools`` are appended after local Shell — the team tools
-        (``send_message``, ``spawn_agent``) come in this way, so a single-agent
-        run that passes none simply has Shell plus hosted web search. The
-        session log and transcript session header are initialized here.
-        ``context_window`` overrides the model-resolved window when given.
+        file. Baseline tools are local Shell, focused file reading, hosted web
+        search, and (by default) reload_harness. ``extra_tools`` are appended
+        after those — the team tools (``send_message``, ``spawn_agent``) come in
+        this way. The session log and transcript session header are initialized
+        here. ``context_window`` overrides the model-resolved window when given.
         """
         if resume_runtime_state:
             restored = cls.load(
@@ -105,6 +107,7 @@ class Agent:
                 agents_md=agents_md,
                 context_window=context_window,
                 extra_tools=extra_tools,
+                include_reload_tool=include_reload_tool,
             )
             if restored is not None:
                 return restored
@@ -129,10 +132,14 @@ class Agent:
             )
         tool_output_char_cap = max_tool_result_chars or token_limit_to_char_cap(tool_output_token_limit)
 
-        tools = build_tools(
-            BashTool(cwd=cwd, max_output_chars=tool_output_char_cap),
-            *(extra_tools or []),
-        )
+        shell_tool = BashTool(cwd=cwd, max_output_chars=tool_output_char_cap)
+        baseline_tools: list[Tool] = [
+            shell_tool,
+            ReadFileTool(cwd_getter=lambda shell_tool=shell_tool: shell_tool.cwd),
+        ]
+        if include_reload_tool:
+            baseline_tools.append(ReloadHarnessTool())
+        tools = build_tools(*baseline_tools, *(extra_tools or []))
 
         return cls(
             agent_id=agent_id,
@@ -162,6 +169,7 @@ class Agent:
         agents_md: str | None = None,
         context_window: int | None = None,
         extra_tools: list[Tool] | None = None,
+        include_reload_tool: bool = True,
     ) -> "Agent | None":
         """Restore an Agent from JSON runtime state, building fresh tools."""
         memory_store = MemoryStore(agent_id=agent_id, base_dir=base_dir)
@@ -210,10 +218,14 @@ class Agent:
             or token_limit_to_char_cap(effective_tool_tokens)
         )
         shell_cwd = state.get("shell_cwd") if isinstance(state.get("shell_cwd"), str) else None
-        tools = build_tools(
-            BashTool(cwd=shell_cwd or cwd, max_output_chars=tool_output_char_cap),
-            *(extra_tools or []),
-        )
+        shell_tool = BashTool(cwd=shell_cwd or cwd, max_output_chars=tool_output_char_cap)
+        baseline_tools: list[Tool] = [
+            shell_tool,
+            ReadFileTool(cwd_getter=lambda shell_tool=shell_tool: shell_tool.cwd),
+        ]
+        if include_reload_tool:
+            baseline_tools.append(ReloadHarnessTool())
+        tools = build_tools(*baseline_tools, *(extra_tools or []))
 
         flush = state.get("flush_state") if isinstance(state.get("flush_state"), dict) else {}
         return cls(

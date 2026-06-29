@@ -28,7 +28,7 @@ def test_with_tools_and_memory_sections_appear():
     assert "# Memory" in out
     assert "AGENT_MEMORY.md" in out
     assert "session-NNN.md" in out
-    # shell-is-the-file-tool note appears only when shell is present.
+    # shell fallback file-tool note appears only when shell is present.
     assert "file tool" in out
 
 

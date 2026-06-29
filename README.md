@@ -54,7 +54,6 @@ python -m claw_zero --tick-seconds 60                   # self-tick every 60s (o
 python -m claw_zero --base-dir ./state                  # where memory + transcript live
 python -m claw_zero --agents planner,coder,reviewer     # launch a team (flat peer mesh)
 python -m claw_zero --no-spawn                          # forbid runtime spawn_agent
-python -m claw_zero --supervise                         # enable reload_harness + worker restart
 python -m claw_zero --auto-compact-token-limit 64000    # explicit compaction trigger
 python -m claw_zero --tool-output-token-limit 12000     # per-tool-output token budget
 python -m claw_zero --help                              # all knobs
@@ -75,8 +74,7 @@ python -m claw_zero --agents coder,reviewer
 You (the human) are a named participant too — `operator` by default; rename
 yourself with `--operator-id alex` so agents address you as `alex`.
 
-What changes when there's more than one agent (and nothing otherwise — a lone
-agent is byte-for-byte the original claw-zero):
+What changes when there's more than one agent:
 
 - **Two team tools appear** ("absence is the signal" — they're only registered
   when the run is team-capable):
@@ -101,19 +99,16 @@ process.
 
 ## Self-reload
 
-Run with `--supervise` to put a stable parent process around the worker:
-
-```bash
-python -m claw_zero --supervise
-```
-
-Only supervised workers see `reload_harness`. After an agent edits harness source
-via `shell` and runs the relevant checks, it can call `reload_harness(reason=...,
-tests_run=..., summary=...)`. The worker records the request, saves JSON runtime
-state, exits with the named reload code, and the supervisor starts a fresh
-interpreter from the same source tree. Source edits are shared by every agent in
-that worker, so a teammate's harness improvement applies to all agents after the
-restart.
+Normal `python -m claw_zero` runs include a small stable parent process around
+the agent worker; no opt-in flag is needed. Every agent sees `reload_harness`.
+After an agent edits harness source via `shell` and runs the relevant checks, it
+can call `reload_harness(reason=..., tests_run=..., summary=...)`. The worker
+records the request, saves JSON runtime state, exits with the named reload code,
+and the parent starts a fresh interpreter from the same source tree. On restart,
+the parent/worker queues one normal operator message with content `continue` to
+the requesting agent so it can finish from the saved reload tool result instead
+of waiting silently. Source edits are shared by every agent in that worker, so a
+teammate's harness improvement applies to all agents after the restart.
 
 ## The two-loop split
 
@@ -160,21 +155,25 @@ waits for the next message.
 
 ## Tool surface
 
-claw-zero exposes OpenAI's native local `shell` Responses tool, backed by the
-client-side subprocess executor in `tools/bash.py`. It is also the file tool:
+claw-zero exposes a focused `read_file` function tool plus OpenAI's native
+local `shell` Responses tool, backed by the client-side subprocess executor in
+`tools/bash.py`. Prefer `read_file` for context-efficient file inspection and
+`shell` for commands, edits, writes, and tree-wide operations:
 
 | Need | Use |
 |---|---|
-| read a file | `cat path` / `sed -n '1,40p' path` |
-| search contents | `grep -rn "pat" .` / `rg "pat"` |
-| find files | `find . -name '*.py'` |
-| edit in place | `sed -i ...` / `python -c ...` |
-| write a file | redirection / `python - <<'PY' ...` |
+| read a focused file excerpt | `read_file(path=..., prompt=...)` |
+| read exact lines | `read_file(path=..., start_line=1, line_count=80)` |
+| search within one file | `read_file(path=..., pattern="...")` |
+| search contents across files | `grep -rn "pat" .` / `rg "pat"` via `shell` |
+| find files | `find . -name '*.py'` via `shell` |
+| edit in place | `sed -i ...` / `python -c ...` via `shell` |
+| write a file | redirection / `python - <<'PY' ...` via `shell` |
 
-The working directory **persists** between calls; shell state (env vars,
-functions) does **not** — each call is a fresh `/bin/sh`. Timeouts kill the whole
-process group, so children aren't orphaned. There are no dedicated
-read/write/edit/grep/glob tools and no permission gate.
+The shell working directory **persists** between calls, and `read_file` resolves
+relative paths against that current shell cwd. Shell state (env vars, functions)
+does **not** persist — each call is a fresh `/bin/sh`. Timeouts kill the whole
+process group, so children aren't orphaned. There is no permission gate.
 
 Agents also receive OpenAI's hosted `web_search` Responses tool for up-to-date
 public information. It is not dispatched locally; OpenAI runs the search inside
@@ -191,8 +190,9 @@ claw_zero_state/<agent_id>/
     └── session-NNN.md       # append-only session log (scratchpad)
 ```
 
-The agent reads and writes these **via shell** (their absolute paths are surfaced
-in the prompt's Runtime context). Before context is compacted, a
+The agent reads these with `read_file` or `shell`, and writes them **via shell**
+(their absolute paths are surfaced in the prompt's Runtime context). Before
+context is compacted, a
 **flush-before-compaction** turn (`memory/flush.py`) gives the model one chance
 to persist durable memory via a `memory_write` call routed to the store — so
 durable memory survives context loss on long runs.
@@ -227,7 +227,7 @@ The package modules live at the repo root (the importable package name is
 ```text
 claw-zero/                 # repo root == the claw_zero package
 ├── pyproject.toml         # packaging — maps the claw_zero package onto the root
-├── __main__.py            # entry point — builds the Team, runs it until stdin EOF
+├── __main__.py            # entry point — default parent/worker reload boundary
 ├── config.py              # ClawZeroConfig (roster + spawn knobs; no LLM effort knob)
 ├── llm.py                 # single OpenAI Responses call + context-window fallback
 ├── prompt.py              # gated "absence is the signal" builder (+ # Team section)

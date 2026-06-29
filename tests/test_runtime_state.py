@@ -8,8 +8,13 @@ from claw_zero.memory.flush import FlushState
 from claw_zero.messaging.bus import MessageBus
 from claw_zero.messaging.mailbox import Message
 from claw_zero.outer_loop import Agent
-from claw_zero.runtime_state import RELOAD_STATE_FILE, RUNTIME_STATE_FILE
-from claw_zero.tools.reload_harness import ReloadHarnessTool, ReloadRequested
+from claw_zero.runtime_state import (
+    RELOAD_STATE_FILE,
+    RUNTIME_STATE_FILE,
+    mark_reload_continue_enqueued,
+    pending_reload_continue,
+)
+from claw_zero.tools.reload_harness import ReloadRequested
 
 
 class FakePeer:
@@ -134,7 +139,6 @@ def test_reload_harness_records_paired_tool_result_and_metadata(tmp_path, monkey
             agent_id="claw-zero",
             model="gpt-5.5",
             base_dir=str(tmp_path),
-            extra_tools=[ReloadHarnessTool()],
         )
         bus.add_agent(agent.agent_id)
         task = asyncio.create_task(outer_loop.run(bus, agent))
@@ -158,3 +162,33 @@ def test_reload_harness_records_paired_tool_result_and_metadata(tmp_path, monkey
     assert runtime["messages"][-1] == tool_msg
     assert reload_state["reason"] == "pick up edited source"
     assert reload_state["exit_code"] == 75
+
+
+def test_pending_reload_continue_is_marked_once(tmp_path):
+    reload_path = tmp_path / "claw-zero" / RELOAD_STATE_FILE
+    reload_path.parent.mkdir()
+    reload_path.write_text(json.dumps({
+        "version": 1,
+        "requested_at": "2026-06-29T00:00:00+00:00",
+        "agent_id": "claw-zero",
+        "reason": "test reload",
+    }))
+
+    pending = pending_reload_continue(tmp_path)
+    assert pending is not None
+    assert pending["agent_id"] == "claw-zero"
+    assert pending["path"] == str(reload_path)
+
+    marked = mark_reload_continue_enqueued(
+        pending["path"],
+        sender="operator",
+        recipient="claw-zero",
+        content="continue",
+    )
+    assert marked is not None
+    assert marked["continue_message"] == {
+        "sender": "operator",
+        "recipient": "claw-zero",
+        "content": "continue",
+    }
+    assert pending_reload_continue(tmp_path) is None

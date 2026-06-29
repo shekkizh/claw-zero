@@ -334,9 +334,10 @@ in §15 and should not be confused with remote A2A transport.
 ## 15. Reloadable self-modifying harness — MVP SHIPPED
 
 > **2026-06-28:** MVP shipped. Runtime state persists to JSON, workers resume it,
-> completed activations save state, supervisor-managed workers expose
-> `reload_harness`, reload requests are auditable, source identity is logged on
-> worker start, runtime-spawned teammates are restored, and subprocess smoke
+> completed activations save state, normal CLI runs start a reload-capable
+> worker and every agent exposes `reload_harness`; reload requests are auditable, source identity is logged on
+> worker start, a post-reload operator `continue` message is queued once,
+> runtime-spawned teammates are restored, and subprocess smoke
 > tests prove a restarted worker sees changed source under a fresh interpreter.
 > Source edits are shared by the whole worker/team: learning by one teammate
 > applies to all agents after reload because they run from the same codebase.
@@ -438,7 +439,8 @@ Team/multi-agent follow-up state:
 - [x] **Pending inboxes.** Decide whether reload waits for the mesh to become idle
   before exiting (preferred MVP) or serializes pending bus messages. If serializing,
   include sender, recipient, kind, content, and ordering. MVP requests reload at
-  the tool-call boundary and persists per-agent state; pending inbox
+  the tool-call boundary, persists per-agent state, and queues one post-reload
+  operator `continue` message to the requesting agent; general pending inbox
   serialization remains a later extension.
 - [x] **External peers.** Preserve operator id / stdio addressing configuration;
   do not duplicate peer bridges across restarts.
@@ -455,19 +457,21 @@ Team/multi-agent follow-up state:
 - [x] **15.4.3 Save-at-boundaries.** Save runtime state after each activation and
   immediately before reload. This makes reload and crashes use the same recovery
   path.
-- [x] **15.4.4 Supervisor entrypoint.** Add a stable supervisor mode/entrypoint
+- [x] **15.4.4 Supervisor entrypoint.** Add a stable parent entrypoint
   that starts a worker subprocess with explicit args/env/cwd and handles normal
-  exit vs reload-request exit vs failure.
+  exit vs reload-request exit vs failure. Normal CLI invocation uses it by
+  default; no public opt-in flag is needed.
 - [x] **15.4.5 Worker entrypoint.** Split the current CLI enough that the worker
-  can run under supervision while preserving existing `python -m claw_zero`
-  behavior. The worker owns the actual agent/team loop.
-- [x] **15.4.6 `reload_harness` tool.** Register this tool only when running under
-  a reload-capable supervisor. Parameters should include at least `reason` and
+  can run under the parent process. The worker owns the actual agent/team loop.
+- [x] **15.4.6 `reload_harness` tool.** Register this tool as a baseline agent
+  tool in normal runs. Parameters should include at least `reason` and
   optionally `tests_run` / `summary`. The tool should:
   1. append an auditable transcript/session-log entry,
   2. save all runtime state,
   3. write reload metadata,
-  4. request clean worker shutdown with the reload exit code.
+  4. request clean worker shutdown with the reload exit code. On restart, the
+     worker queues a normal operator `continue` message once so the requesting
+     agent resumes from the saved tool result.
 - [x] **15.4.7 Clean shutdown path.** Avoid `os._exit` except as a last-resort
   fallback. Prefer raising/propagating a typed reload signal to the top-level
   worker so `finally` blocks, transcript flushes, and subprocess cleanup can run.
@@ -477,15 +481,15 @@ Team/multi-agent follow-up state:
 - [x] **15.4.9 Source identity logging.** On worker start, log source root, git
   commit if available, dirty status summary, argv, model, and state dir. After
   reload, record that the new worker picked up code from disk.
-- [x] **15.4.10 Backward compatibility.** Existing single-process CLI should keep
-  working. If no supervisor is present, `reload_harness` should be absent or
-  return a clear unsupported error; absence is preferred.
+- [x] **15.4.10 Backward compatibility.** Existing CLI invocations keep working,
+  but now enter the parent/worker split by default so any agent can reload
+  without extra flags.
 
 ### 15.5 Prompt/tool contract updates
 
-- [x] **Prompt: explain reload capability only when available.** Add a gated
-  prompt section saying the agent may edit harness code, run checks, and call
-  `reload_harness` to pick up changes. Do not show this section when unsupported.
+- [x] **Prompt: explain reload capability.** Add prompt/tool guidance saying the
+  agent may edit harness code, run checks, and call `reload_harness` to pick up
+  changes.
 - [x] **Prompt: require verification disclosure.** The agent must report whether
   it ran tests before requesting reload and must not imply tests passed if they
   were not run.
@@ -504,10 +508,12 @@ Unit tests:
   state should produce equivalent next API input shape.
 - [x] Serializer uses JSON-compatible primitives only; no pickle/class-object
   dependency.
-- [x] `reload_harness` is absent when not supervised, or returns a deterministic
-  unsupported result if intentionally registered.
+- [x] `reload_harness` is present as a baseline agent tool in normal runs; the
+  default CLI parent process restarts the worker when it requests reload.
 - [x] `reload_harness` writes reload metadata and causes the worker to choose the
   reload exit code through a typed signal.
+- [x] A reload restart queues one operator `continue` message to the requesting
+  agent and marks the reload metadata so it only happens once.
 - [x] Supervisor restarts on reload exit code and does not restart on normal exit.
 - [x] Supervisor enforces restart-loop guard.
 
@@ -527,13 +533,14 @@ Integration tests / smoke tests:
 
 ### 15.7 Acceptance criteria for the MVP
 
-- [x] A supervised run can edit source code, request reload, and resume from the
+- [x] A normal run can edit source code, request reload, and resume from the
   same state directory under a fresh interpreter.
 - [x] The post-reload worker demonstrably uses changed source code, not old module
   objects.
 - [x] Conversation history, transcript append path, session memory, flush state,
   and token accounting survive the restart.
-- [x] Existing unsupervised `python -m claw_zero` behavior still works.
+- [x] Existing `python -m claw_zero` invocations still work and are reload-capable
+  by default.
 - [x] Existing tests pass, plus new reload serializer/supervisor tests pass.
 - [x] Reload attempts are auditable in transcript/session logs.
 - [x] A broken reload does not spin forever; failure is reported with the relevant

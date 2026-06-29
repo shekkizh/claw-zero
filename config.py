@@ -33,20 +33,20 @@ class ClawZeroConfig:
     """Whether agents may bring new teammates online at runtime via the
     ``spawn_agent`` tool. The tool is only registered when this is True."""
 
-    reload_enabled: bool = False
-    """Whether to expose ``reload_harness``. Only supervised workers set this."""
+    reload_enabled: bool = True
+    """Whether to expose ``reload_harness`` so agents can restart after source edits."""
 
     resume_runtime_state: bool = False
     """Load ``runtime_state.json`` for each agent when present."""
 
-    supervise: bool = False
-    """Launch a stable parent process that restarts workers on reload requests."""
+    supervise: bool = True
+    """Whether this CLI invocation should run the restart supervisor. Normal runs do."""
 
     worker: bool = False
-    """Internal flag: this process is a supervisor-managed worker."""
+    """Internal flag: this process is the child that owns the actual agent loop."""
 
     max_reloads: int = 5
-    """Maximum reload restarts per supervised run."""
+    """Maximum reload restarts per run."""
 
     operator_id: str = "operator"
     """The human operator's participant name. The human is a named participant on
