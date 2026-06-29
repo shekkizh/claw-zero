@@ -54,6 +54,7 @@ python -m claw_zero --tick-seconds 60                   # self-tick every 60s (o
 python -m claw_zero --base-dir ./state                  # where memory + transcript live
 python -m claw_zero --agents planner,coder,reviewer     # launch a team (flat peer mesh)
 python -m claw_zero --no-spawn                          # forbid runtime spawn_agent
+python -m claw_zero --supervise                         # enable reload_harness + worker restart
 python -m claw_zero --auto-compact-token-limit 64000    # explicit compaction trigger
 python -m claw_zero --tool-output-token-limit 12000     # per-tool-output token budget
 python -m claw_zero --help                              # all knobs
@@ -97,6 +98,22 @@ other messages over the bus. It is **in-process** — every agent is a coroutine
 one event loop, routed by recipient id. There is no network layer and no notion
 of external/remote agents; the team is the set of agents you launch in this
 process.
+
+## Self-reload
+
+Run with `--supervise` to put a stable parent process around the worker:
+
+```bash
+python -m claw_zero --supervise
+```
+
+Only supervised workers see `reload_harness`. After an agent edits harness source
+via `shell` and runs the relevant checks, it can call `reload_harness(reason=...,
+tests_run=..., summary=...)`. The worker records the request, saves JSON runtime
+state, exits with the named reload code, and the supervisor starts a fresh
+interpreter from the same source tree. Source edits are shared by every agent in
+that worker, so a teammate's harness improvement applies to all agents after the
+restart.
 
 ## The two-loop split
 
@@ -214,6 +231,9 @@ claw-zero/                 # repo root == the claw_zero package
 ├── config.py              # ClawZeroConfig (roster + spawn knobs; no LLM effort knob)
 ├── llm.py                 # single OpenAI Responses call + context-window fallback
 ├── prompt.py              # gated "absence is the signal" builder (+ # Team section)
+├── supervisor.py          # stable parent restart loop for reloadable workers
+├── runtime_state.py       # JSON runtime/team/reload state persistence
+├── source_identity.py     # source root / git / marker logging
 ├── AGENTS.md              # the persistent operating doc (peer-among-peers ethos)
 ├── team.py                # Team orchestrator — owns the bus, roster, loops, spawn
 ├── outer_loop.py          # one agent's self-owned loop + Agent (durable state)

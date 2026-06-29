@@ -74,6 +74,16 @@ class MemoryStore:
         self._current_session_path = session_file
         return str(session_file.relative_to(self.base_dir))
 
+    def resume_session(self, relative_path: str) -> str:
+        """Resume appending to an existing session log under ``base_dir``."""
+        resolved = (self.base_dir / relative_path).resolve()
+        if not resolved.is_relative_to(self.base_dir.resolve()):
+            raise ValueError("path traversal is not allowed; use a relative path within memory")
+        if not resolved.exists():
+            raise FileNotFoundError(relative_path)
+        self._current_session_path = resolved
+        return str(resolved.relative_to(self.base_dir.resolve()))
+
     def append_session(self, text: str) -> str:
         """Append a timestamped entry to the current session log.
 

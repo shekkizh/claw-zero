@@ -33,6 +33,21 @@ class ClawZeroConfig:
     """Whether agents may bring new teammates online at runtime via the
     ``spawn_agent`` tool. The tool is only registered when this is True."""
 
+    reload_enabled: bool = False
+    """Whether to expose ``reload_harness``. Only supervised workers set this."""
+
+    resume_runtime_state: bool = False
+    """Load ``runtime_state.json`` for each agent when present."""
+
+    supervise: bool = False
+    """Launch a stable parent process that restarts workers on reload requests."""
+
+    worker: bool = False
+    """Internal flag: this process is a supervisor-managed worker."""
+
+    max_reloads: int = 5
+    """Maximum reload restarts per supervised run."""
+
     operator_id: str = "operator"
     """The human operator's participant name. The human is a named participant on
     the bus, addressed by this name like any agent — not a generic "human" role.
@@ -98,6 +113,8 @@ class ClawZeroConfig:
             raise ValueError(
                 f"context_window_tokens must be positive or None, got {self.context_window_tokens!r}"
             )
+        if self.max_reloads < 0:
+            raise ValueError(f"max_reloads must be non-negative, got {self.max_reloads!r}")
         if not self.agent_id.strip():
             raise ValueError("agent_id must be a non-empty string")
         if not self.operator_id.strip():

@@ -276,3 +276,28 @@ the gitignored `claw_zero_state/<agent_id>/memory/`.
 - Verification: focused config/inner/memory/llm/bash tests passed (40 tests),
   full `.venv/bin/pytest` passed (79 tests), `.venv/bin/python -m compileall -q .`
   passed, and `git diff --check` passed.
+
+## 2026-06-28 Plan review: shell-first self-improving direction
+
+- Reviewed README.md and docs/claw-zero-TODO.md for the current design direction. README documents the existing OpenAI Responses harness, equal-peer bus, outer/inner loop split, and agent-facing local Shell surface.
+- docs/claw-zero-TODO.md shows phases 0-14 shipped and identifies section 15 as the active TODO: a reloadable self-modifying harness with supervisor/worker restart, durable runtime state serialization, reload_harness tool, and auditable restarts.
+- Attempted to append this note with bare python first, but zsh reported `python: command not found`; using .venv/bin/python works in this repo.
+- Key interpretation: removing model-facing module/tool abstractions means exposing capabilities as scripts/commands through shell, while keeping minimal Python harness internals stable enough to launch, persist state, route messages, and reload after self-edits.
+
+## 2026-06-28 Reloadable harness MVP slice
+
+- Implemented a lean first slice of section 15: JSON runtime state persistence, runtime-state resume, save-after-activation, supervisor/worker CLI flags, and a gated `reload_harness` tool.
+- Runtime state lives at `<base-dir>/<agent_id>/runtime_state.json` and stores messages, flush state, token accounting, shell cwd, session log path, transcript last-entry id, and core limits. Reload metadata lives at `reload_state.json` with exit code 75.
+- `reload_harness` is registered only for supervisor-managed workers; it writes a paired tool result into conversation history, records an audit note, saves state, and raises a typed reload signal.
+- The supervisor is intentionally small: `--supervise` launches `python -m claw_zero --worker --resume-runtime-state`, restarts on exit code 75, and stops at `--max-reloads`.
+- During verification, full pytest initially exposed stale tests expecting `reasoning.summary="auto"` and a lower memory-flush reserve. Operator clarified the defaults were correct, so defaults stayed unchanged and tests were updated to match `summary="concise"` and the existing max-output/tool-output reserve.
+- Verification: focused runtime/team tests passed, `.venv/bin/python -m py_compile ...` passed, full `.venv/bin/pytest` passed (83 tests), `.venv/bin/python -m claw_zero --help` passed, and `git diff --check` passed.
+
+## 2026-06-28 Reloadable harness MVP completion
+
+- Completed the missing section 15 MVP proof points after operator asked why section 15 was not complete.
+- Added `supervisor.py` so restart behavior is a small testable parent-process loop; `__main__.py` now delegates supervised worker restarts to it.
+- Added `reload_marker.py` and `source_identity.py`; worker startup logs source root, git commit/dirty status, marker, argv/model/state context to stdout plus each agent's session/transcript.
+- Added team roster persistence via `team_state.json`; runtime-spawned teammates are restored on reload, including when `--no-spawn` is used on the resumed run. Source edits by any teammate are explicitly treated as shared by all agents because the whole worker restarts from one codebase.
+- Added supervisor subprocess smokes for marker reload, toy tool behavior reload, state continuity, normal-exit behavior, and reload-loop guard. Disabled bytecode writes in source-edit smokes after observing same-size fast edits could otherwise reuse stale `.pyc` cache.
+- Verification: focused supervisor/team/runtime tests passed (13 then 15 tests as added), full `.venv/bin/pytest` passed (91 tests), supervised EOF CLI smoke passed, `py_compile` passed for changed modules/tests, and `git diff --check` passed.

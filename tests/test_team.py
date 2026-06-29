@@ -125,3 +125,54 @@ def test_single_agent_run_has_no_team_tools(tmp_path):
     team2 = Team(_config(tmp_path, agent_id="lead", agents=["helper"]), agents_md="# home")
     lead = team2.add_agent("lead")
     assert "send_message" in lead.tools.summaries and "spawn_agent" in lead.tools.summaries
+
+
+def test_reload_tool_is_supervisor_gated_not_team_gated(tmp_path):
+    config = _config(tmp_path, agent_id="solo")
+    team = Team(config, agents_md="# home", allow_spawn=False, allow_reload=True)
+    agent = team.add_agent("solo")
+    assert "reload_harness" in agent.tools.summaries
+    assert "send_message" not in agent.tools.summaries
+    assert "spawn_agent" not in agent.tools.summaries
+
+
+def test_resume_restores_spawned_teammate_roster(tmp_path):
+    async def scenario():
+        config = _config(tmp_path, agent_id="planner")
+        team = Team(config, agents_md="# home")
+        team.add_agent("planner")
+        result = await team._spawn(
+            new_id="researcher",
+            model=None,
+            brief=None,
+            spawned_by="planner",
+        )
+        assert result["success"] is True
+
+        resumed = Team(config, agents_md="# home", resume_runtime_state=True)
+        resumed.add_agent("planner")
+        resumed.restore_saved_agents()
+        return resumed.agent_ids, resumed._members["planner"].agent.tools.summaries
+
+    agent_ids, summaries = asyncio.run(scenario())
+    assert agent_ids == ["planner", "researcher"]
+    assert "send_message" in summaries
+
+
+def test_saved_roster_is_team_capable_even_when_spawn_disabled(tmp_path):
+    async def seed():
+        config = _config(tmp_path, agent_id="planner")
+        team = Team(config, agents_md="# home")
+        team.add_agent("planner")
+        await team._spawn(new_id="researcher", model=None, brief=None, spawned_by="planner")
+
+    asyncio.run(seed())
+
+    config = _config(tmp_path, agent_id="planner", allow_spawn=False)
+    resumed = Team(config, agents_md="# home", allow_spawn=False, resume_runtime_state=True)
+    planner = resumed.add_agent("planner")
+    resumed.restore_saved_agents()
+
+    assert resumed.agent_ids == ["planner", "researcher"]
+    assert "send_message" in planner.tools.summaries
+    assert "spawn_agent" not in planner.tools.summaries

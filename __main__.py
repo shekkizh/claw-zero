@@ -15,11 +15,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
+import sys
 
 from .config import ClawZeroConfig
 from .messaging.peer import StdioPeer
+from .runtime_state import RELOAD_REQUESTED_EXIT_CODE
+from .source_identity import collect_source_identity, format_source_identity
+from .supervisor import supervise_command
 from .team import Team
+from .tools.reload_harness import ReloadRequested
 
 
 def _load_agents_md() -> str | None:
@@ -47,6 +53,23 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
         "--no-spawn", action="store_true",
         help="Disallow runtime spawning of new teammates (drops the spawn_agent tool).",
     )
+    parser.add_argument(
+        "--supervise",
+        action="store_true",
+        help="Run a stable supervisor that restarts the worker when reload_harness is requested.",
+    )
+    parser.add_argument(
+        "--resume-runtime-state",
+        action="store_true",
+        help="Resume from runtime_state.json if present (normally used by the supervisor).",
+    )
+    parser.add_argument(
+        "--max-reloads",
+        type=int,
+        default=ClawZeroConfig.max_reloads,
+        help="Maximum reload restarts in one supervised run (default: %(default)s).",
+    )
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--tick-seconds", type=float, default=None, help="Self-tick interval, applied to every agent (default: off)")
     parser.add_argument("--base-dir", default=None, help="State root (default: claw_zero_state)")
     parser.add_argument(
@@ -74,6 +97,11 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
         operator_id=args.operator_id,
         agents=roster,
         allow_spawn=not args.no_spawn,
+        reload_enabled=args.worker,
+        resume_runtime_state=args.resume_runtime_state,
+        supervise=args.supervise,
+        worker=args.worker,
+        max_reloads=args.max_reloads,
         tick_seconds=args.tick_seconds,
         base_dir=args.base_dir,
         auto_compact_token_limit=args.auto_compact_token_limit,
@@ -84,17 +112,35 @@ def _parse_args(argv: list[str] | None = None) -> ClawZeroConfig:
     )
 
 
-async def _run(config: ClawZeroConfig) -> None:
-    team = Team(config, agents_md=_load_agents_md(), allow_spawn=config.allow_spawn)
+async def _run(config: ClawZeroConfig, argv: list[str] | None = None) -> None:
+    team = Team(
+        config,
+        agents_md=_load_agents_md(),
+        allow_spawn=config.allow_spawn,
+        allow_reload=config.reload_enabled,
+        resume_runtime_state=config.resume_runtime_state,
+    )
 
     # The primary agent plus any roster teammates. Your typed lines reach the
     # primary by default; address any other agent by name (`@name` / `name:`).
     team.add_agent(config.agent_id, config.model)
     for name in config.agents:
         team.add_agent(name, config.model)
+    if config.resume_runtime_state:
+        team.restore_saved_agents()
 
     operator = StdioPeer(peer_id=config.operator_id, default_recipient=config.agent_id)
     team.add_peer(operator)
+
+    identity = collect_source_identity(
+        source_root=Path(__file__).resolve().parent,
+        argv=argv or [],
+        model=config.model,
+        state_dir=config.base_dir or "claw_zero_state",
+        worker=config.worker,
+    )
+    print(f"claw-zero {format_source_identity(identity)}", flush=True)
+    team.record_worker_start(identity)
 
     roster = team.agent_ids
     if len(roster) == 1:
@@ -116,10 +162,36 @@ async def _run(config: ClawZeroConfig) -> None:
     await team.run_until_eof(operator)
 
 
+def _worker_argv(raw_argv: list[str]) -> list[str]:
+    child = list(raw_argv)
+    if "--worker" not in child:
+        child.append("--worker")
+    if "--resume-runtime-state" not in child:
+        child.append("--resume-runtime-state")
+    return child
+
+
+async def _supervise(raw_argv: list[str], max_reloads: int) -> int:
+    source_root = Path(__file__).resolve().parent
+    child_argv = _worker_argv(raw_argv)
+    return await supervise_command(
+        [sys.executable, "-m", "claw_zero", *child_argv],
+        cwd=source_root,
+        env=os.environ.copy(),
+        max_reloads=max_reloads,
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
-    config = _parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    config = _parse_args(raw_argv)
     try:
-        asyncio.run(_run(config))
+        if config.supervise and not config.worker:
+            raise SystemExit(asyncio.run(_supervise(raw_argv, config.max_reloads)))
+        asyncio.run(_run(config, raw_argv))
+    except ReloadRequested as exc:
+        print(f"\nclaw-zero: reload requested: {exc.reason}", flush=True)
+        raise SystemExit(RELOAD_REQUESTED_EXIT_CODE) from exc
     except KeyboardInterrupt:
         print("\nclaw-zero: interrupted, shutting down.", flush=True)
 

@@ -32,6 +32,9 @@ from .messaging.bus import MessageBus
 from .messaging.mailbox import Message
 from .messaging.peer import Peer, StdioPeer, tick_source
 from .outer_loop import Agent
+from .runtime_state import load_team_state, write_team_state
+from .source_identity import format_source_identity
+from .tools.reload_harness import ReloadHarnessTool, ReloadRequested
 from .tools.registry import Tool
 from .tools.send_message import SendMessageTool
 from .tools.spawn_agent import SpawnAgentTool
@@ -59,17 +62,22 @@ class Team:
         *,
         agents_md: str | None = None,
         allow_spawn: bool = True,
+        allow_reload: bool = False,
+        resume_runtime_state: bool = False,
     ) -> None:
         self._config = config
         self._agents_md = agents_md
         self._allow_spawn = allow_spawn
-        # Team-capable when there's a roster beyond the primary agent, OR an
-        # agent may bring teammates online at runtime. A run that is neither (one
-        # agent, no spawn) is the original single-agent claw-zero: baseline
-        # shell/web-search tools, no team prose. Computed up front from config so
-        # it's stable for the whole run (it gates the cached static prompt prefix
-        # — see has_team).
-        self._team_capable = bool(config.agents) or allow_spawn
+        self._allow_reload = allow_reload
+        self._resume_runtime_state = resume_runtime_state
+        self._suppress_team_state_save = resume_runtime_state
+        self._saved_team_state = load_team_state(config.base_dir) if resume_runtime_state else None
+        # Team-capable when there's a configured/saved roster beyond the primary,
+        # OR an agent may bring teammates online at runtime. A run that is none
+        # of those is the original single-agent claw-zero: baseline shell/search
+        # tools, no team prose. Computed up front because it gates the cached
+        # static prompt prefix.
+        self._team_capable = bool(config.agents) or allow_spawn or self._saved_team_has_multiple_agents()
         self.bus = MessageBus()
         self._members: dict[str, _Member] = {}
         self._extra_tasks: list[asyncio.Task] = []
@@ -80,15 +88,17 @@ class Team:
     def _team_tools(self, agent_id: str) -> list[Tool]:
         """The team-aware tools, bound to ``agent_id`` and the shared bus.
 
-        Empty for a non-team-capable run (absence is the signal — a lone agent
-        keeps only the baseline Shell/web-search surface). Otherwise ``send_message`` is
-        always present, and ``spawn_agent`` only when runtime spawning is allowed.
+        Team tools appear only for a team-capable run (absence is the signal —
+        a lone agent keeps no team prose). ``reload_harness`` is independent and
+        appears only for a supervisor-managed worker.
         """
-        if not self._team_capable:
-            return []
-        tools: list[Tool] = [SendMessageTool(self.bus, agent_id)]
-        if self._allow_spawn:
-            tools.append(SpawnAgentTool(self._spawn, agent_id))
+        tools: list[Tool] = []
+        if self._team_capable:
+            tools.append(SendMessageTool(self.bus, agent_id))
+            if self._allow_spawn:
+                tools.append(SpawnAgentTool(self._spawn, agent_id))
+        if self._allow_reload:
+            tools.append(ReloadHarnessTool())
         return tools
 
     def _build_agent(self, agent_id: str, model: str) -> Agent:
@@ -105,6 +115,7 @@ class Team:
             agents_md=self._agents_md,
             context_window=self._config.context_window_tokens,
             extra_tools=self._team_tools(agent_id),
+            resume_runtime_state=self._resume_runtime_state,
         )
 
     def add_agent(self, agent_id: str, model: str | None = None) -> Agent:
@@ -113,6 +124,8 @@ class Team:
             return self._members[agent_id].agent
         agent = self._build_agent(agent_id, model or self._config.model)
         self._members[agent_id] = _Member(agent=agent, idle=asyncio.Event())
+        if not self._suppress_team_state_save:
+            self.save_team_state(reason="agent_added")
         return agent
 
     def add_peer(self, peer: Peer) -> None:
@@ -125,6 +138,41 @@ class Team:
 
     def context_window_of(self, agent_id: str) -> int:
         return self._members[agent_id].agent.context_window
+
+    def restore_saved_agents(self) -> None:
+        """Restore saved spawned teammates after configured roster is present."""
+        state = self._saved_team_state
+        try:
+            if state is None:
+                return
+            for member in state.get("members", []):
+                if not isinstance(member, dict):
+                    continue
+                agent_id = member.get("id")
+                model = member.get("model")
+                if not isinstance(agent_id, str) or not agent_id.strip():
+                    continue
+                if agent_id == self._config.operator_id:
+                    continue
+                if model is not None and not isinstance(model, str):
+                    model = None
+                self.add_agent(agent_id, model or self._config.model)
+        finally:
+            self._suppress_team_state_save = False
+            self.save_team_state(reason="runtime_state_restored")
+
+    def _saved_team_has_multiple_agents(self) -> bool:
+        if not isinstance(self._saved_team_state, dict):
+            return False
+        members = self._saved_team_state.get("members")
+        if not isinstance(members, list):
+            return False
+        ids = {
+            member.get("id")
+            for member in members
+            if isinstance(member, dict) and isinstance(member.get("id"), str)
+        }
+        return len(ids) > 1
 
     # -- runtime spawn (the spawn_agent tool calls this) ---------------------
 
@@ -168,6 +216,7 @@ class Team:
                 )
             )
 
+        self.save_team_state(reason="agent_spawned")
         return {
             "success": True,
             "spawned": new_id,
@@ -197,6 +246,36 @@ class Team:
     def _all_idle(self) -> bool:
         return all(m.idle.is_set() for m in self._members.values())
 
+    def save_team_state(self, *, reason: str) -> dict[str, Any]:
+        return write_team_state(self._config.base_dir, self._team_state_payload(reason))
+
+    def save_all_runtime_state(self, *, reason: str) -> None:
+        for member in self._members.values():
+            member.agent.save_runtime_state(reason=reason)
+        self.save_team_state(reason=reason)
+
+    def record_worker_start(self, source_identity: dict[str, Any]) -> None:
+        note = format_source_identity(source_identity)
+        for member in self._members.values():
+            try:
+                member.agent.memory_store.append_session(note)
+            except RuntimeError:
+                pass
+            member.agent.transcript.append_message("system", note)
+
+    def _team_state_payload(self, reason: str) -> dict[str, Any]:
+        return {
+            "reason": reason,
+            "primary_agent_id": self._config.agent_id,
+            "operator_id": self._config.operator_id,
+            "allow_spawn": self._allow_spawn,
+            "allow_reload": self._allow_reload,
+            "members": [
+                {"id": agent_id, "model": member.agent.model}
+                for agent_id, member in self._members.items()
+            ],
+        }
+
     async def run_until_eof(self, operator: StdioPeer) -> None:
         """Run the team until the operator's stdin closes, then drain + tear down.
 
@@ -207,20 +286,36 @@ class Team:
         self.start()
         inbound_task = asyncio.create_task(operator.inbound(self.bus))
         try:
-            await inbound_task
+            while True:
+                tasks = [inbound_task, *self._agent_tasks()]
+                done, _pending = await asyncio.wait(
+                    tasks,
+                    timeout=0.1,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+                self._raise_finished_agent_errors(done, inbound_task=inbound_task)
+                if inbound_task in done:
+                    break
+
             # Graceful drain: done once no inbox has pending work AND every loop
             # is sitting idle. Agents can still be messaging each other, so we
             # wait for the whole mesh to settle, not just one loop.
             while self.bus.has_pending() or not self._all_idle():
+                self._raise_finished_agent_errors(self._agent_tasks())
                 await asyncio.sleep(0.1)
                 if not self.bus.has_pending() and self._all_idle():
                     break
+        except ReloadRequested:
+            self.save_all_runtime_state(reason="reload_requested")
+            raise
         finally:
             await self.shutdown()
 
     async def shutdown(self) -> None:
         """Cancel all loop tasks and the tick source; await their teardown."""
-        tasks = [m.task for m in self._members.values() if m.task is not None]
+        tasks = self._agent_tasks()
         tasks += self._extra_tasks
         for task in tasks:
             task.cancel()
@@ -229,3 +324,22 @@ class Team:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    def _agent_tasks(self) -> list[asyncio.Task]:
+        return [m.task for m in self._members.values() if m.task is not None]
+
+    def _raise_finished_agent_errors(
+        self,
+        tasks: set[asyncio.Task] | list[asyncio.Task],
+        *,
+        inbound_task: asyncio.Task | None = None,
+    ) -> None:
+        for task in tasks:
+            if task is inbound_task or not task.done() or task.cancelled():
+                continue
+            exc = task.exception()
+            if isinstance(exc, ReloadRequested):
+                raise exc
+            if exc is not None:
+                raise exc
+            raise RuntimeError("agent loop exited unexpectedly")

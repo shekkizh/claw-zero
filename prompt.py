@@ -136,6 +136,17 @@ def _tools(tool_summaries: dict[str, str]) -> list[str]:
                 "",
             ]
         )
+    if "reload_harness" in tool_summaries:
+        lines.extend(
+            [
+                "`reload_harness` asks a supervisor to restart the worker from "
+                "the current source tree. Use it only after source edits and "
+                "honest verification disclosure; it saves state and exits, it "
+                "does not by itself finish the peer task. Source edits are "
+                "shared by all agents in the worker after restart.",
+                "",
+            ]
+        )
     return lines
 
 

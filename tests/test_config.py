@@ -33,6 +33,8 @@ def test_validation_rejects_bad_values():
         ClawZeroConfig(tick_seconds=0)
     with pytest.raises(ValueError):
         ClawZeroConfig(agent_id="  ")
+    with pytest.raises(ValueError):
+        ClawZeroConfig(max_reloads=-1)
 
 
 def test_roster_defaults_empty_and_spawn_on():

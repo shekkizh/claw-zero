@@ -34,7 +34,9 @@ from .memory.store import MemoryStore
 from .messaging.bus import MessageBus
 from .messaging.mailbox import Message
 from .prompt import ContextFile, RuntimeContext, build_prompt
+from .runtime_state import load_runtime_state, save_agent_state, write_reload_state
 from .tools.bash import BashTool
+from .tools.reload_harness import ReloadRequested
 from .tools.registry import Tool, ToolRegistry, build_tools
 
 
@@ -79,6 +81,7 @@ class Agent:
         agents_md: str | None = None,
         context_window: int | None = None,
         extra_tools: list[Tool] | None = None,
+        resume_runtime_state: bool = False,
     ) -> "Agent":
         """Wire up an Agent with its memory store, transcript, and tools.
 
@@ -89,6 +92,23 @@ class Agent:
         session log and transcript session header are initialized here.
         ``context_window`` overrides the model-resolved window when given.
         """
+        if resume_runtime_state:
+            restored = cls.load(
+                agent_id=agent_id,
+                model=model,
+                base_dir=base_dir,
+                auto_compact_token_limit=auto_compact_token_limit,
+                tool_output_token_limit=tool_output_token_limit,
+                compaction_threshold=compaction_threshold,
+                max_tool_result_chars=max_tool_result_chars,
+                cwd=cwd,
+                agents_md=agents_md,
+                context_window=context_window,
+                extra_tools=extra_tools,
+            )
+            if restored is not None:
+                return restored
+
         memory_store = MemoryStore(agent_id=agent_id, base_dir=base_dir)
         memory_store.init_session()
         transcript = Transcript(agent_id=agent_id, base_dir=base_dir)
@@ -114,13 +134,6 @@ class Agent:
             *(extra_tools or []),
         )
 
-        context_files: list[ContextFile] = []
-        if agents_md:
-            context_files.append(ContextFile(path="AGENTS.md", content=agents_md))
-        curated = memory_store.read_curated()
-        if curated.strip():
-            context_files.append(ContextFile(path="AGENT_MEMORY.md", content=curated))
-
         return cls(
             agent_id=agent_id,
             model=model,
@@ -131,8 +144,127 @@ class Agent:
             auto_compact_token_limit=compact_limit,
             tool_output_token_limit=tool_output_token_limit,
             max_tool_result_chars=tool_output_char_cap,
-            context_files=context_files,
+            context_files=cls._context_files(memory_store, agents_md),
         )
+
+    @classmethod
+    def load(
+        cls,
+        *,
+        agent_id: str,
+        model: str,
+        base_dir: str | None = None,
+        auto_compact_token_limit: int | None = None,
+        tool_output_token_limit: int = DEFAULT_TOOL_OUTPUT_TOKENS,
+        compaction_threshold: float | None = None,
+        max_tool_result_chars: int | None = None,
+        cwd: str | None = None,
+        agents_md: str | None = None,
+        context_window: int | None = None,
+        extra_tools: list[Tool] | None = None,
+    ) -> "Agent | None":
+        """Restore an Agent from JSON runtime state, building fresh tools."""
+        memory_store = MemoryStore(agent_id=agent_id, base_dir=base_dir)
+        state = load_runtime_state(memory_store.agent_dir)
+        if state is None:
+            return None
+
+        session_log = state.get("session_log")
+        if isinstance(session_log, str) and session_log:
+            try:
+                memory_store.resume_session(session_log)
+            except (OSError, ValueError):
+                memory_store.init_session()
+        else:
+            memory_store.init_session()
+
+        transcript = Transcript(agent_id=agent_id, base_dir=base_dir)
+        transcript_last_entry_id = state.get("transcript_last_entry_id")
+        transcript.resume(
+            transcript_last_entry_id if isinstance(transcript_last_entry_id, str) else None
+        )
+
+        resolved_context_window = _state_int(state, "context_window") or context_window or resolve_context_window(model)
+        compact_limit = auto_compact_token_limit or _state_int(state, "auto_compact_token_limit")
+        if compact_limit is None:
+            compact_limit = (
+                int(resolved_context_window * compaction_threshold)
+                if compaction_threshold is not None
+                else default_auto_compact_token_limit(resolved_context_window)
+            )
+        if not 0 < compact_limit <= resolved_context_window:
+            raise ValueError(
+                "auto_compact_token_limit must be in (0, context_window], "
+                f"got {compact_limit!r} for window {resolved_context_window!r}"
+            )
+
+        restored_tool_tokens = _state_int(state, "tool_output_token_limit")
+        effective_tool_tokens = (
+            tool_output_token_limit
+            if tool_output_token_limit != DEFAULT_TOOL_OUTPUT_TOKENS
+            else restored_tool_tokens or tool_output_token_limit
+        )
+        tool_output_char_cap = (
+            max_tool_result_chars
+            or _state_int(state, "max_tool_result_chars")
+            or token_limit_to_char_cap(effective_tool_tokens)
+        )
+        shell_cwd = state.get("shell_cwd") if isinstance(state.get("shell_cwd"), str) else None
+        tools = build_tools(
+            BashTool(cwd=shell_cwd or cwd, max_output_chars=tool_output_char_cap),
+            *(extra_tools or []),
+        )
+
+        flush = state.get("flush_state") if isinstance(state.get("flush_state"), dict) else {}
+        return cls(
+            agent_id=agent_id,
+            model=state.get("model") if isinstance(state.get("model"), str) else model,
+            memory_store=memory_store,
+            transcript=transcript,
+            tools=tools,
+            context_window=resolved_context_window,
+            auto_compact_token_limit=compact_limit,
+            tool_output_token_limit=effective_tool_tokens,
+            max_tool_result_chars=tool_output_char_cap,
+            context_files=cls._context_files(memory_store, agents_md),
+            last_api_input_tokens=_state_int(state, "last_api_input_tokens") or 0,
+            messages=state.get("messages") if isinstance(state.get("messages"), list) else [],
+            flush_state=FlushState(
+                compaction_count=flush.get("compaction_count", 0) if isinstance(flush.get("compaction_count", 0), int) else 0,
+                flushed_at_compaction_count=(
+                    flush.get("flushed_at_compaction_count")
+                    if isinstance(flush.get("flushed_at_compaction_count"), int)
+                    else None
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _context_files(memory_store: MemoryStore, agents_md: str | None) -> list[ContextFile]:
+        context_files: list[ContextFile] = []
+        if agents_md:
+            context_files.append(ContextFile(path="AGENTS.md", content=agents_md))
+        curated = memory_store.read_curated()
+        if curated.strip():
+            context_files.append(ContextFile(path="AGENT_MEMORY.md", content=curated))
+        return context_files
+
+    def save_runtime_state(self, *, reason: str) -> dict[str, Any]:
+        return save_agent_state(self, reason=reason)
+
+    def record_reload_request(self, request: ReloadRequested) -> None:
+        note = (
+            f"reload_harness requested. reason={request.reason!r}; "
+            f"tests_run={request.tests_run or 'not specified'!r}; "
+            f"summary={request.summary or ''!r}"
+        )
+        try:
+            self.memory_store.append_session(note)
+        except RuntimeError:
+            pass
+        self.transcript.append_message("system", note)
+        state_payload = self.save_runtime_state(reason="reload_requested")
+        write_reload_state(self, request, state_payload=state_payload)
 
     def build_system_prompt(self, peers: list[str]) -> str:
         """Assemble the system prompt with current runtime context.
@@ -244,7 +376,19 @@ async def run(
             last_api_input_tokens=agent.last_api_input_tokens,
         )
 
-        reply = await inner_loop.run(ctx)
+        try:
+            reply = await inner_loop.run(ctx)
+        except ReloadRequested as exc:
+            exc.agent_id = agent.agent_id
+            agent.last_api_input_tokens = ctx.last_api_input_tokens
+            agent.record_reload_request(exc)
+            raise
         agent.last_api_input_tokens = ctx.last_api_input_tokens
         await deliver(reply, bus)
+        agent.save_runtime_state(reason="activation_complete")
         # loop forever; no exit condition
+
+
+def _state_int(state: dict[str, Any], key: str) -> int | None:
+    value = state.get(key)
+    return value if isinstance(value, int) and value > 0 else None

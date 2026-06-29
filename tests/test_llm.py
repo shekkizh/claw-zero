@@ -94,7 +94,7 @@ def test_build_openai_kwargs_maps_parameters():
         "instructions": "SYS\n\nDYNAMIC",
         "max_output_tokens": 123,
         "temperature": 1.0,
-        "reasoning": {"effort": "xhigh", "summary": "auto"},
+        "reasoning": {"effort": "xhigh", "summary": "concise"},
         "tools": [tool],
         "timeout": 30,
     }

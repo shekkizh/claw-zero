@@ -64,12 +64,12 @@ def test_read_file_traversal_guard(tmp_path):
 
 def test_flush_trigger_thresholds():
     state = FlushState()
-    # Explicit compact limit 160K; reserve is normal output + tool output, then 4K soft cushion.
+    # Explicit compact limit 160K; reserve is max output + tool output, then 4K soft cushion.
     assert should_run_memory_flush(
-        state, current_tokens=135_000, context_window=200_000, auto_compact_token_limit=160_000
+        state, current_tokens=15_000, context_window=200_000, auto_compact_token_limit=160_000
     ) is False
     assert should_run_memory_flush(
-        state, current_tokens=137_000, context_window=200_000, auto_compact_token_limit=160_000
+        state, current_tokens=16_000, context_window=200_000, auto_compact_token_limit=160_000
     ) is True
     # Transcript-size trigger fires independently of token count.
     assert should_run_memory_flush(
@@ -79,11 +79,17 @@ def test_flush_trigger_thresholds():
 
 def test_flush_dedup_within_compaction_cycle():
     state = FlushState(compaction_count=0)
-    assert should_run_memory_flush(state, current_tokens=80_000, context_window=200_000) is True
+    assert should_run_memory_flush(
+        state, current_tokens=80_000, context_window=200_000, auto_compact_token_limit=200_000
+    ) is True
     state.flushed_at_compaction_count = 0  # simulate a flush having run
-    assert should_run_memory_flush(state, current_tokens=80_000, context_window=200_000) is False
+    assert should_run_memory_flush(
+        state, current_tokens=80_000, context_window=200_000, auto_compact_token_limit=200_000
+    ) is False
     state.compaction_count = 1  # new compaction cycle → eligible again
-    assert should_run_memory_flush(state, current_tokens=80_000, context_window=200_000) is True
+    assert should_run_memory_flush(
+        state, current_tokens=80_000, context_window=200_000, auto_compact_token_limit=200_000
+    ) is True
 
 
 def test_run_flush_routes_memory_write(tmp_path, monkeypatch):
@@ -139,6 +145,6 @@ def test_maybe_flush_respects_trigger(tmp_path, monkeypatch):
     # Above threshold → flush runs.
     ran = asyncio.run(maybe_flush_memory(
         model="m", messages=[], memory_store=store, state=state,
-        current_tokens=80_000, context_window=200_000,
+        current_tokens=80_000, context_window=200_000, auto_compact_token_limit=200_000,
     ))
     assert ran is True and calls["n"] == 1

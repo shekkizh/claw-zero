@@ -66,6 +66,17 @@ class Transcript:
         )
         return run_number
 
+    @property
+    def last_entry_id(self) -> str | None:
+        return self._last_entry_id
+
+    def resume(self, last_entry_id: str | None = None) -> None:
+        """Resume appending to the existing transcript without a new header."""
+        if last_entry_id:
+            self._last_entry_id = last_entry_id
+            return
+        self._last_entry_id = self._read_last_entry_id()
+
     def append_message(
         self,
         role: str,
@@ -141,3 +152,19 @@ class Transcript:
             except json.JSONDecodeError:
                 continue
         return count
+
+    def _read_last_entry_id(self) -> str | None:
+        if not self.path.exists():
+            return None
+        last_id = None
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry_id = json.loads(line).get("id")
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry_id, str) and entry_id:
+                last_id = entry_id
+        return last_id

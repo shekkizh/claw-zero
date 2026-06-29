@@ -35,6 +35,7 @@ from .context.transcript import Transcript
 from .memory.flush import FlushState, maybe_flush_memory
 from .memory.store import MemoryStore
 from .messaging.mailbox import Message
+from .tools.reload_harness import ReloadRequested
 from .tools.registry import ToolRegistry
 
 
@@ -81,6 +82,7 @@ class ActivationContext:
     tool_output_token_limit: int = llm.DEFAULT_TOOL_OUTPUT_TOKENS
     instructions_tokens: int = field(default=0)
     last_api_input_tokens: int = field(default=0)
+    reload_request: ReloadRequested | None = None
 
     @property
     def agent_id(self) -> str:
@@ -211,6 +213,9 @@ async def _dispatch_tool(ctx: ActivationContext, tool_call: "llm.ToolCall") -> d
 
     try:
         result = await handler(args)
+    except ReloadRequested as exc:
+        ctx.reload_request = exc
+        result = exc.tool_result()
     except Exception as exc:  # noqa: BLE001 — a tool crash must not kill the loop
         result = {"success": False, "error": f"Tool {tool_call.name!r} raised: {exc}"}
 
@@ -406,6 +411,8 @@ async def run(ctx: ActivationContext) -> Message:
                 tool_msg = await _dispatch_tool(ctx, tool_call)
                 ctx.messages.append(tool_msg)
                 ctx.transcript.append_message("tool", tool_msg["content"], tool_call_id=tool_call.id)
+                if ctx.reload_request is not None:
+                    raise ctx.reload_request
             # 5. Compact in place if we've crossed the budget.
             await _maybe_flush_then_compact(ctx)
             continue
